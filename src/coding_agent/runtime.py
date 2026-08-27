@@ -80,5 +80,7 @@ class ConsoleReporter:
             print(f"Result ({status}): {message}")
         elif event.kind == "final":
             print(f"\nFinal Answer:\n{event.message}")
+        elif event.kind == "verification":
+            print(f"Verification Guard: {event.message}")
         elif event.kind == "stopped":
             print(f"\nStopped: {event.message}")

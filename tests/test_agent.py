@@ -74,11 +74,7 @@ def test_real_tools_complete_read_edit_execute_final_flow(tmp_path: Path) -> Non
                     "x",
                     "run_command",
                     {
-                        "argv": [
-                            sys.executable,
-                            "-c",
-                            "from value import VALUE; assert VALUE == 2",
-                        ]
+                        "argv": [sys.executable, "value.py"]
                     },
                 ),
             ),
@@ -90,6 +86,7 @@ def test_real_tools_complete_read_edit_execute_final_flow(tmp_path: Path) -> Non
 
     assert result.status == "completed"
     assert result.workspace_changed
+    assert result.verification_observed
     assert target.read_text(encoding="utf-8") == "VALUE = 2\n"
     assert any(message["role"] == "tool" for message in model.requests[-1])
 
@@ -103,6 +100,7 @@ def test_multiple_calls_are_executed_in_order(tmp_path: Path) -> None:
                 ("b", "write_file", {"path": "b.txt", "content": "b"}),
             ),
             _response("done"),
+            _response("Created both text files; no meaningful automated verification exists."),
         ]
     )
     result = _runner(tmp_path, model).run()
@@ -151,3 +149,60 @@ def test_max_steps_stops_infinite_tool_loop(tmp_path: Path) -> None:
     assert result.status == "max_steps"
     assert result.steps == 3
 
+
+def test_verification_guard_requests_execution_before_final(tmp_path: Path) -> None:
+    (tmp_path / "check.py").write_text("assert True\n", encoding="utf-8")
+    model = FakeModel(
+        [
+            _response(
+                "",
+                (
+                    "e",
+                    "edit_file",
+                    {"path": "check.py", "old_text": "True", "new_text": "1 == 1"},
+                ),
+            ),
+            _response("I changed the file."),
+            _response(
+                "",
+                (
+                    "v",
+                    "run_command",
+                    {"argv": [sys.executable, "check.py"]},
+                ),
+            ),
+            _response("Changed and verified."),
+        ]
+    )
+
+    result = _runner(tmp_path, model).run()
+
+    assert result.status == "completed"
+    assert result.verification_observed
+    guard_messages = [
+        message
+        for message in model.requests[2]
+        if message["role"] == "user" and "not verified" in message["content"]
+    ]
+    assert len(guard_messages) == 1
+
+
+def test_verification_guard_reminds_once_when_verification_is_unavailable(
+    tmp_path: Path,
+) -> None:
+    model = FakeModel(
+        [
+            _response(
+                "",
+                ("w", "write_file", {"path": "notes.txt", "content": "documentation"}),
+            ),
+            _response("Done."),
+            _response("No meaningful automated verification exists for this text-only change."),
+        ]
+    )
+
+    result = _runner(tmp_path, model).run()
+
+    assert result.status == "completed"
+    assert not result.verification_observed
+    assert result.steps == 3

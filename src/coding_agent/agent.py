@@ -55,6 +55,9 @@ class AgentRunner:
         workspace_changed = False
         verification_observed = False
         consecutive_tool_errors = 0
+        workspace_revision = 0
+        verified_revision = 0
+        reminded_revision = 0
 
         for step in range(1, self.max_steps + 1):
             self._emit("step", step, f"Agent step {step}/{self.max_steps}")
@@ -70,6 +73,20 @@ class AgentRunner:
                 self._emit("model", step, response.content)
 
             if not response.tool_calls:
+                if (
+                    workspace_revision > verified_revision
+                    and reminded_revision < workspace_revision
+                ):
+                    feedback = (
+                        "You modified the workspace but have not verified the latest changes. "
+                        "Run an appropriate test, build, lint, or program execution if one is "
+                        "available. If no meaningful automated verification exists, explain "
+                        "that explicitly in your next final answer."
+                    )
+                    reminded_revision = workspace_revision
+                    self.context.add_feedback(response.provider_message, feedback)
+                    self._emit("verification", step, feedback, ok=False)
+                    continue
                 self._emit("final", step, response.content)
                 return AgentResult(
                     final_answer=response.content,
@@ -95,8 +112,10 @@ class AgentRunner:
                 if result.ok and result.changed:
                     workspace_changed = True
                     verification_observed = False
+                    workspace_revision += 1
                 if result.ok and result.verification:
                     verification_observed = True
+                    verified_revision = workspace_revision
                 self._emit(
                     "tool_result",
                     step,
@@ -166,4 +185,3 @@ def _summarize_arguments(raw: str, limit: int = 400) -> str:
             summarized[key] = value
     rendered = json.dumps(summarized, ensure_ascii=False)
     return rendered if len(rendered) <= limit else rendered[:limit] + "..."
-
