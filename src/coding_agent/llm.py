@@ -43,6 +43,14 @@ class AssistantResponse:
     provider_message: JsonObject
 
 
+@dataclass(frozen=True, slots=True)
+class ModelStreamEvent:
+    """Provider-neutral text delta emitted during a streamed completion."""
+
+    kind: str
+    delta: str
+
+
 class ModelClient(Protocol):
     def complete(
         self, *, messages: Sequence[JsonObject], tools: Sequence[JsonObject]
@@ -81,17 +89,7 @@ class DeepSeekChatClient:
     def complete(
         self, *, messages: Sequence[JsonObject], tools: Sequence[JsonObject]
     ) -> AssistantResponse:
-        request: JsonObject = {
-            "model": self._model,
-            "messages": list(messages),
-            "extra_body": {
-                "thinking": {"type": "enabled" if self._thinking_enabled else "disabled"}
-            },
-        }
-        if tools:
-            request["tools"] = list(tools)
-        if self._thinking_enabled:
-            request["reasoning_effort"] = self._reasoning_effort
+        request = self._request(messages=messages, tools=tools)
 
         for attempt in range(self._max_retries + 1):
             try:
@@ -107,6 +105,118 @@ class DeepSeekChatClient:
                 ) from exc
 
         raise AssertionError("unreachable")
+
+    def complete_stream(
+        self,
+        *,
+        messages: Sequence[JsonObject],
+        tools: Sequence[JsonObject],
+        on_event: Callable[[ModelStreamEvent], None],
+    ) -> AssistantResponse:
+        """Stream a completion while returning the same aggregate as ``complete``."""
+
+        request = self._request(messages=messages, tools=tools)
+        request["stream"] = True
+        emitted = False
+        for attempt in range(self._max_retries + 1):
+            try:
+                stream = self._client.chat.completions.create(**request)
+                reasoning_parts: list[str] = []
+                content_parts: list[str] = []
+                calls: dict[int, dict[str, str]] = {}
+                for chunk in stream:
+                    choices = getattr(chunk, "choices", None)
+                    if not choices:
+                        continue
+                    delta = getattr(choices[0], "delta", None)
+                    if delta is None:
+                        continue
+                    reasoning = getattr(delta, "reasoning_content", None)
+                    if isinstance(reasoning, str) and reasoning:
+                        reasoning_parts.append(reasoning)
+                        on_event(ModelStreamEvent("reasoning_delta", reasoning))
+                        emitted = True
+                    content = getattr(delta, "content", None)
+                    if isinstance(content, str) and content:
+                        content_parts.append(content)
+                        on_event(ModelStreamEvent("content_delta", content))
+                        emitted = True
+                    for raw_call in getattr(delta, "tool_calls", None) or []:
+                        index = getattr(raw_call, "index", None)
+                        if not isinstance(index, int):
+                            index = len(calls)
+                        aggregate = calls.setdefault(
+                            index, {"id": "", "name": "", "arguments": ""}
+                        )
+                        call_id = getattr(raw_call, "id", None)
+                        if isinstance(call_id, str):
+                            aggregate["id"] += call_id
+                        function = getattr(raw_call, "function", None)
+                        name = getattr(function, "name", None)
+                        arguments = getattr(function, "arguments", None)
+                        if isinstance(name, str):
+                            aggregate["name"] += name
+                        if isinstance(arguments, str):
+                            aggregate["arguments"] += arguments
+
+                return self._from_stream_parts(
+                    content="".join(content_parts),
+                    reasoning="".join(reasoning_parts),
+                    calls=calls,
+                )
+            except Exception as exc:
+                if not emitted and attempt < self._max_retries and self._is_retryable(exc):
+                    self._sleep(min(2**attempt, 4))
+                    continue
+                message = str(exc).replace(self._api_key, "[REDACTED]")
+                raise ModelError(
+                    f"DeepSeek streaming request failed ({type(exc).__name__}): {message}"
+                ) from exc
+        raise AssertionError("unreachable")
+
+    def _request(
+        self, *, messages: Sequence[JsonObject], tools: Sequence[JsonObject]
+    ) -> JsonObject:
+        request: JsonObject = {
+            "model": self._model,
+            "messages": list(messages),
+            "extra_body": {
+                "thinking": {"type": "enabled" if self._thinking_enabled else "disabled"}
+            },
+        }
+        if tools:
+            request["tools"] = list(tools)
+        if self._thinking_enabled:
+            request["reasoning_effort"] = self._reasoning_effort
+        return request
+
+    def _from_stream_parts(
+        self, *, content: str, reasoning: str, calls: dict[int, dict[str, str]]
+    ) -> AssistantResponse:
+        normalized: list[ToolCall] = []
+        replay_calls: list[JsonObject] = []
+        for index in sorted(calls):
+            item = calls[index]
+            if not all(item.values()):
+                raise ModelError("DeepSeek returned a malformed streamed tool call")
+            normalized.append(ToolCall(item["id"], item["name"], item["arguments"]))
+            replay_calls.append(
+                {
+                    "id": item["id"],
+                    "type": "function",
+                    "function": {"name": item["name"], "arguments": item["arguments"]},
+                }
+            )
+        if not content and not normalized:
+            raise ModelError("DeepSeek returned neither content nor tool calls")
+        provider: JsonObject = {
+            "role": "assistant",
+            "content": content,
+            "reasoning_content": reasoning,
+        }
+        if replay_calls:
+            provider["tool_calls"] = replay_calls
+        return AssistantResponse(content, tuple(normalized), provider)
 
     def _normalize(self, completion: Any) -> AssistantResponse:
         choices = getattr(completion, "choices", None)
@@ -171,4 +281,3 @@ class DeepSeekChatClient:
         if isinstance(exc, APIStatusError):
             return exc.status_code >= 500
         return False
-

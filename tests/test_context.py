@@ -65,3 +65,21 @@ def test_interaction_without_tool_result_is_rejected() -> None:
     else:
         raise AssertionError("expected ValueError")
 
+
+def test_completed_turns_round_trip_and_old_turns_prune_atomically() -> None:
+    context = ContextManager(
+        system_prompt="system", soft_budget=1100, min_recent_turns=1
+    )
+    for number in range(3):
+        context.start_turn(f"task {number}" + "x" * 300)
+        context.finish_turn(
+            {"role": "assistant", "content": f"answer {number}" + "y" * 300}
+        )
+
+    restored = ContextManager.from_dict(context.to_dict())
+    messages = restored.messages()
+    assert restored.pruned_turns > 0
+    assert messages[0] == {"role": "system", "content": "system"}
+    assert messages[-2]["role"] == "user"
+    assert messages[-1]["role"] == "assistant"
+    assert restored.turn_count == 1

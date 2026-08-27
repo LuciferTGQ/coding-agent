@@ -135,3 +135,72 @@ def test_empty_response_is_protocol_error() -> None:
     with pytest.raises(ModelError, match="neither content nor tool calls"):
         model.complete(messages=[], tools=[])
 
+
+def _chunk(**kwargs: Any) -> Any:
+    return SimpleNamespace(choices=[SimpleNamespace(delta=SimpleNamespace(**kwargs))])
+
+
+def test_streaming_aggregates_reasoning_content_and_fragmented_tool_calls() -> None:
+    chunks = [
+        _chunk(reasoning_content="inspect ", content=None, tool_calls=[]),
+        _chunk(reasoning_content="file", content=None, tool_calls=[]),
+        _chunk(
+            reasoning_content=None,
+            content="",
+            tool_calls=[
+                SimpleNamespace(
+                    index=0,
+                    id="call_",
+                    function=SimpleNamespace(name="read_", arguments='{"pa'),
+                )
+            ],
+        ),
+        _chunk(
+            reasoning_content=None,
+            content=None,
+            tool_calls=[
+                SimpleNamespace(
+                    index=0,
+                    id="1",
+                    function=SimpleNamespace(name="file", arguments='th":"x"}'),
+                )
+            ],
+        ),
+    ]
+    model, completions = _client([chunks])
+    events = []
+
+    result = model.complete_stream(messages=[], tools=[], on_event=events.append)
+
+    assert [event.delta for event in events] == ["inspect ", "file"]
+    assert result.tool_calls[0].id == "call_1"
+    assert result.tool_calls[0].name == "read_file"
+    assert result.tool_calls[0].arguments == '{"path":"x"}'
+    assert result.provider_message["reasoning_content"] == "inspect file"
+    assert result.provider_message["tool_calls"][0]["id"] == "call_1"
+    assert completions.requests[0]["stream"] is True
+
+
+def test_streaming_aggregates_public_content() -> None:
+    model, _ = _client(
+        [[
+            _chunk(reasoning_content="r", content=None, tool_calls=[]),
+            _chunk(reasoning_content=None, content="hel", tool_calls=[]),
+            _chunk(reasoning_content=None, content="lo", tool_calls=[]),
+        ]]
+    )
+    events = []
+
+    result = model.complete_stream(messages=[], tools=[], on_event=events.append)
+
+    assert result.content == "hello"
+    assert [event.kind for event in events] == [
+        "reasoning_delta",
+        "content_delta",
+        "content_delta",
+    ]
+    assert result.provider_message == {
+        "role": "assistant",
+        "content": "hello",
+        "reasoning_content": "r",
+    }
