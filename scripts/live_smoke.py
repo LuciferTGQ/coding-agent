@@ -42,15 +42,26 @@ def main() -> int:
     ]
 
     saw_tool_call = False
+    saw_stream_delta = False
     for _ in range(4):
-        response = model.complete(messages=messages, tools=[TOOL])
+        events = []
+        response = model.complete_stream(
+            messages=messages,
+            tools=[TOOL],
+            on_event=events.append,
+        )
+        saw_stream_delta = saw_stream_delta or bool(events)
         messages.append(response.provider_message)
         if not response.tool_calls:
             if not saw_tool_call:
                 raise RuntimeError("Protocol smoke failed: the model did not call the tool")
             if "PROTOCOL_OK" not in response.content:
                 raise RuntimeError("Protocol smoke failed: final answer omitted the tool result")
-            print("PASS: thinking + tool call + tool result + next request + final response")
+            if not saw_stream_delta:
+                raise RuntimeError("Protocol smoke failed: no streaming delta was observed")
+            print(
+                "PASS: streaming thinking + tool call + tool result + next request + final response"
+            )
             return 0
         for call in response.tool_calls:
             if call.name != "get_protocol_marker" or json.loads(call.arguments) != {}:
@@ -67,4 +78,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

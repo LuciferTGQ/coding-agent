@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, Iterable
 
@@ -51,7 +52,12 @@ class SessionRuntime:
         if not session.transcript:
             session.title = title_from_message(message)
         session.transcript.append(
-            {"type": "user", "text": message.strip(), "attachments": attached}
+            {
+                "type": "user",
+                "text": message.strip(),
+                "attachments": attached,
+                "timestamp": _timestamp(),
+            }
         )
         self.store.save(session)
 
@@ -116,10 +122,14 @@ class SessionRuntime:
             if session.transcript and session.transcript[-1].get("type") == item_type:
                 session.transcript[-1]["text"] += event.message
             else:
-                session.transcript.append({"type": item_type, "text": event.message})
+                session.transcript.append(
+                    {"type": item_type, "text": event.message, "timestamp": _timestamp()}
+                )
             return
         if event.kind == "model":
-            session.transcript.append({"type": "assistant_stream", "text": event.message})
+            session.transcript.append(
+                {"type": "assistant_stream", "text": event.message, "timestamp": _timestamp()}
+            )
         elif event.kind == "tool_call":
             session.transcript.append(
                 {
@@ -128,6 +138,7 @@ class SessionRuntime:
                     "call_id": event.call_id,
                     "text": event.message,
                     "status": "running",
+                    "timestamp": _timestamp(),
                 }
             )
         elif event.kind == "tool_result":
@@ -138,6 +149,7 @@ class SessionRuntime:
                     "call_id": event.call_id,
                     "text": event.message,
                     "ok": event.ok,
+                    "timestamp": _timestamp(),
                 }
             )
         elif event.kind == "final":
@@ -145,10 +157,18 @@ class SessionRuntime:
                 session.transcript[-1]["type"] = "assistant"
                 session.transcript[-1]["text"] = event.message
             else:
-                session.transcript.append({"type": "assistant", "text": event.message})
+                session.transcript.append(
+                    {"type": "assistant", "text": event.message, "timestamp": _timestamp()}
+                )
         elif event.kind in {"verification", "stopped"}:
             session.transcript.append(
-                {"type": "status", "kind": event.kind, "text": event.message, "ok": event.ok}
+                {
+                    "type": "status",
+                    "kind": event.kind,
+                    "text": event.message,
+                    "ok": event.ok,
+                    "timestamp": _timestamp(),
+                }
             )
 
     @staticmethod
@@ -171,3 +191,7 @@ class SessionRuntime:
             reasoning_effort=config.reasoning_effort,
             thinking_enabled=config.thinking_enabled,
         )
+
+
+def _timestamp() -> str:
+    return datetime.now(timezone.utc).isoformat()
