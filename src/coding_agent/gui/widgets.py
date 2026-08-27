@@ -2,11 +2,10 @@
 
 from __future__ import annotations
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QFont, QTextCursor
 from PySide6.QtWidgets import (
     QFrame,
-    QHBoxLayout,
     QLabel,
     QPlainTextEdit,
     QScrollArea,
@@ -28,18 +27,28 @@ class MessageBubble(QFrame):
         self.body = QLabel(text)
         self.body.setWordWrap(True)
         self.body.setTextInteractionFlags(Qt.TextSelectableByMouse)
-        self.body.setTextFormat(Qt.PlainText)
+        self.body.setTextFormat(Qt.PlainText if role == "user" else Qt.MarkdownText)
+        self.body.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Minimum)
         layout.addWidget(heading)
         layout.addWidget(self.body)
         self.setMaximumWidth(860)
         if role != "user":
             self.setMinimumWidth(520)
+        self.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Minimum)
+        self._sync_height()
 
     def append_text(self, delta: str) -> None:
         self.body.setText(self.body.text() + delta)
+        self._sync_height()
 
     def set_text(self, text: str) -> None:
         self.body.setText(text)
+        self._sync_height()
+
+    def _sync_height(self) -> None:
+        self.body.updateGeometry()
+        self.updateGeometry()
+        self.setMinimumHeight(max(54, self.sizeHint().height()))
 
 
 class CollapsibleCard(QFrame):
@@ -100,14 +109,14 @@ class ConversationView(QScrollArea):
         self.layout = QVBoxLayout(self.container)
         self.layout.setContentsMargins(24, 24, 24, 24)
         self.layout.setSpacing(12)
-        self.layout.addStretch(1)
+        self.layout.setAlignment(Qt.AlignTop)
         self.setWidget(self.container)
         self._reasoning: CollapsibleCard | None = None
         self._assistant: MessageBubble | None = None
         self._tools: dict[str, ToolCard] = {}
 
     def clear_transcript(self) -> None:
-        while self.layout.count() > 1:
+        while self.layout.count():
             item = self.layout.takeAt(0)
             if item.widget():
                 item.widget().deleteLater()
@@ -116,16 +125,8 @@ class ConversationView(QScrollArea):
         self._tools = {}
 
     def add_item(self, widget: QWidget, *, align_right: bool = False) -> None:
-        row = QWidget()
-        row_layout = QHBoxLayout(row)
-        row_layout.setContentsMargins(0, 0, 0, 0)
-        if align_right:
-            row_layout.addStretch(1)
-            row_layout.addWidget(widget)
-        else:
-            row_layout.addWidget(widget)
-            row_layout.addStretch(1)
-        self.layout.insertWidget(self.layout.count() - 1, row)
+        alignment = Qt.AlignRight if align_right else Qt.AlignLeft
+        self.layout.addWidget(widget, 0, alignment)
         self._scroll_bottom()
 
     def add_user(self, text: str, attachments: list[str] | None = None) -> None:
@@ -204,11 +205,21 @@ class ConversationView(QScrollArea):
                 )
             elif kind == "status":
                 self.add_status(str(item.get("text", "")), item.get("ok"))
+        self.layout.activate()
+        self.container.adjustSize()
+        self._scroll_bottom()
 
     def _reset_stream_targets(self) -> None:
         self._reasoning = None
         self._assistant = None
 
     def _scroll_bottom(self) -> None:
-        bar = self.verticalScrollBar()
-        bar.setValue(bar.maximum())
+        item = self.layout.itemAt(self.layout.count() - 1)
+        widget = item.widget() if item else None
+        if widget is not None:
+            def scroll(target: QWidget = widget) -> None:
+                self.verticalScrollBar().setValue(
+                    min(self.verticalScrollBar().maximum(), target.geometry().top())
+                )
+
+            QTimer.singleShot(0, lambda: QTimer.singleShot(0, scroll))

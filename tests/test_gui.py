@@ -56,3 +56,35 @@ def test_empty_window_keeps_new_conversation_available(tmp_path: Path) -> None:
     assert not window.send_button.isEnabled()
     window.close()
     app.processEvents()
+
+
+def test_long_restored_transcript_does_not_overlap_and_scrolls_to_latest(tmp_path: Path) -> None:
+    app = _app()
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    store = SessionStore(tmp_path / "long-state")
+    session = store.create(workspace=workspace)
+    session.transcript = [
+        {"type": "assistant", "text": "## Result\n\n" + "long response " * 100},
+        {"type": "tool_call", "name": "run_command", "call_id": "c1", "text": "pytest"},
+        {"type": "tool_result", "name": "run_command", "call_id": "c1", "text": "10 passed", "ok": True},
+        {"type": "assistant", "text": "## Summary\n\n" + "restored context " * 100},
+    ]
+    store.save(session)
+    window = MainWindow(store)
+    window.show()
+    window.load_session(session.id)
+    for _ in range(5):
+        app.processEvents()
+
+    widgets = [
+        window.conversation.layout.itemAt(index).widget()
+        for index in range(window.conversation.layout.count())
+    ]
+    for earlier, later in zip(widgets, widgets[1:]):
+        assert earlier.geometry().bottom() < later.geometry().top()
+    last = widgets[-1]
+    visible_bottom = window.conversation.verticalScrollBar().value() + window.conversation.viewport().height()
+    assert last.geometry().top() < visible_bottom
+    window.close()
+    app.processEvents()

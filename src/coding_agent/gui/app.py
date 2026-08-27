@@ -68,6 +68,8 @@ class MainWindow(QMainWindow):
         self.new_button.clicked.connect(self.new_session)
         self.session_list = QListWidget()
         self.session_list.setObjectName("sessionList")
+        self.session_list.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.session_list.setTextElideMode(Qt.ElideRight)
         self.session_list.currentItemChanged.connect(self._session_selected)
         self.delete_button = QPushButton("Delete conversation")
         self.delete_button.clicked.connect(self.delete_session)
