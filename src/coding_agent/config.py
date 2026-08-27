@@ -1,4 +1,4 @@
-"""Configuration loading and the only local API-key file boundary."""
+"""Configuration loading and the model credential boundary."""
 
 from __future__ import annotations
 
@@ -68,8 +68,7 @@ class Config:
                 raise ConfigurationError(f"Could not read local credential file: {credential_path}") from exc
         if require_api_key and not api_key:
             raise ConfigurationError(
-                "DeepSeek API key is missing. Set DEEPSEEK_API_KEY; a local untracked "
-                "api.txt beside the launch directory is also accepted for development."
+                "DeepSeek API key is missing. Set the DEEPSEEK_API_KEY environment variable."
             )
 
         effort = reasoning_effort or os.environ.get("DEEPSEEK_REASONING_EFFORT", "high")
@@ -95,4 +94,3 @@ class Config:
                 "context soft budget", os.environ.get("CODING_AGENT_CONTEXT_BUDGET", "120000")
             ),
         )
-

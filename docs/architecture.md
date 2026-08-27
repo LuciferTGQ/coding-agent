@@ -2,12 +2,9 @@
 
 ## 1. 目标和约束
 
-本项目的核心目标不是复刻完整的 Claude Code 或 Codex，而是以较小代码量清楚展示一个
-Coding Agent Harness 的必要闭环：模型选择动作，本地环境执行动作，结果回传模型，模型再
-依据观察继续行动。考核禁止 Agent Framework、SDK 托管 Agent 逻辑、服务端代码执行和文件
-工具，因此这里只使用普通模型厂商客户端，编排逻辑全部位于仓库内。
+这个 Harness 围绕一个直接的反馈循环设计：模型选择动作，本地环境执行动作，执行结果回传模型，模型再依据观察调整下一步。项目只使用基础模型客户端，不使用 Agent Framework，也不把文件或命令执行托管给 API 服务端。这样能够直接观察 messages、tool calls 和环境结果如何流转。
 
-设计优先级为：可运行的反馈闭环、协议正确、边界集中、失败可恢复、易测试、易在面试中解释。
+设计优先考虑协议正确性、运行可靠性和模块边界。环境失败需要能够回传给模型，每一层也应当可以独立测试。
 
 ## 2. 主数据流
 
@@ -38,9 +35,7 @@ AgentRunner、ContextManager、Workspace、Registry 和 Tools 都拿不到凭据
 
 ### Config 与 CLI
 
-`config.py` 从环境变量读取模型和 Harness 设置，并仅在 Key 缺失时回退到启动目录下未入库的
-`api.txt`。dataclass 将 `api_key` 设为 `repr=False`。`cli.py` 只负责参数和退出码；
-`runtime.py` 构造各层。这样配置、行为和环境操作没有混在一起。
+`config.py` 负责读取和校验模型、Workspace 与 Harness 设置。dataclass 将 `api_key` 设为 `repr=False`；凭据只会从 Config 传入 `DeepSeekChatClient`。`cli.py` 处理参数和退出码，`runtime.py` 负责构造各层。这个分工防止凭据和环境操作渗入 Agent 状态。
 
 ### DeepSeekChatClient
 
@@ -115,9 +110,7 @@ tool results 组成一个 interaction block，裁剪时整体删除或保留。�
 - 不留下缺少执行结果的 assistant tool call；
 - 保留下来的 DeepSeek provider fields 结构完整。
 
-第一版使用字符数 soft budget，而非精确 tokenizer；超预算从最旧完整块开始删除，至少保留最近
-块。没有调用模型生成摘要：小型仓库、1M context 模型和窄工具下，确定性 block pruning 更容易
-测试和解释，也不会增加一次昂贵且可能失真的模型调用。
+当前实现使用字符数 soft budget，而非精确 tokenizer；超预算时从最旧完整块开始删除，并保留最近的交互。它没有调用模型生成摘要。对于小型和中型仓库，确定性 block pruning 足够稳定，并且避免了摘要失真和额外的模型调用。
 
 ### Verification Guard
 
@@ -133,21 +126,15 @@ test/build/lint/program 的成功 `run_command` 才把它标记为已验证。�
 
 ### 为什么不用 Agent Framework
 
-题目明确禁止；更重要的是，框架会隐藏 messages、tool-call parsing、local execution 与 termination
-这些正需展示的 Harness 逻辑。当前模块均可用 FakeModel 和临时 Workspace 单独测试。
+项目希望 messages、tool-call parsing、local execution 与 termination 都是显式的。引入框架会隐藏这些协议边界，也会让调试更依赖框架内部状态。当前每个模块都能使用 FakeModel 和临时 Workspace 独立测试。
 
 ### 为什么当前用 Chat Completions
 
-`assistant.tool_calls → local tool → role=tool → next messages` 与考核数据流一一对应，便于观察
-provider message、Tool Result 和上下文。DeepSeek Responses API 也是有效替代方案，未来若需要
-reasoning/function item 或 Responses 专属能力，可在模型适配层实现；当前切换不会提升小型单 Agent
-Harness 的核心能力，反而增加协议对象种类。
+Chat Completions 的路径是 `assistant.tool_calls → local tool → role=tool → next messages`。这种结构很直接，provider message、Tool Result 和上下文都能独立检查。DeepSeek Responses API 也是有效选项；当项目需要 reasoning/function item 或 Responses 专属能力时，可以在模型适配层增加实现。对当前的单 Agent 本地工具循环来说，切换 API 会增加协议对象，却不会改变核心编排。
 
 ### 为什么只实现 DeepSeek
 
-当前验收模型明确，先把一个 provider 的真实 thinking/tool 多轮协议做对，比建立未被实际验证的
-provider factory 更可靠。`ModelClient` Protocol 和 normalized response 已给测试及未来 provider
-留出边界。
+目前只有 DeepSeek provider 会走真实协议测试。与其先建立一个缺少真实验证的 provider factory，项目选择先把 thinking 与 tool calling 的多轮回传做稳定。`ModelClient` Protocol 和 normalized response 已经隔离了 provider 边界，以后可以在不改动 AgentRunner 的情况下增加适配器。
 
 ### 为什么只有约六个工具
 
@@ -162,9 +149,7 @@ provider factory 更可靠。`ModelClient` Protocol 和 normalized response 已�
 
 ### 为什么不做 Repo Map
 
-Aider 的 Repo Map 用语法树和依赖图在大仓库中选择重要符号，很有价值。但本项目 Demo 小，
-list/search/read 已足够；构建多语言 symbol graph 会分散 Agent Loop 与 ACI 的实现重点。未来面向
-大仓库时可加入 token-bounded repo map。
+Aider 的 Repo Map 用语法树和依赖图在大仓库中选择重要符号。当前范围主要是小型和中型仓库，受限的 list/search/read 已经提供足够的按需上下文。多语言 symbol graph 会引入解析器、排名算法和缓存一致性问题。如果后续面向大型仓库，token-bounded repo map 会是合理的扩展。
 
 ## 5. 安全模型与诚实边界
 
@@ -178,7 +163,7 @@ list/search/read 已足够；构建多语言 symbol graph 会分散 Agent Loop �
 ## 6. 测试策略
 
 - Unit：Config、DeepSeek normalization/retry、Workspace、Registry、每个 Tool、Context；
-- P0：`../`/absolute/symlink escape、Secret 拒绝、invalid JSON/参数、exact edit 三种结果、命令
+- Boundary and execution：`../`/absolute/symlink escape、Secret 拒绝、invalid JSON/参数、exact edit 三种结果、命令
   success/non-zero/timeout、完整块裁剪、Verification Guard、max steps；
 - Integration：FakeModel + real AgentRunner + real Registry/Workspace 完成 read/edit/execute/final；
 - Demo integration：复制真实多文件小项目，证明初始失败，再通过 Harness 修复并验证；
