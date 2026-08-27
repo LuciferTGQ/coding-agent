@@ -4,6 +4,7 @@ from pathlib import Path
 from typing import Sequence
 
 from coding_agent.llm import AssistantResponse
+from coding_agent.llm import ModelError
 from coding_agent.session_runtime import SessionRuntime
 from coding_agent.sessions import SessionStore
 
@@ -92,3 +93,42 @@ def test_attachment_must_be_utf8_workspace_file(tmp_path: Path) -> None:
 
     assert "note.txt" in model.requests[0][1]["content"]
     assert "context" not in model.requests[0][1]["content"]
+
+
+def test_nested_credential_field_is_rejected(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    store = SessionStore(tmp_path / "state")
+    session = store.create(workspace=workspace)
+    session.transcript.append({"type": "status", "api_key": "must-not-save"})
+
+    try:
+        store.save(session)
+    except ValueError as exc:
+        assert "Credentials" in str(exc)
+    else:
+        raise AssertionError("expected credential field rejection")
+
+
+def test_model_failure_is_persisted_as_status(tmp_path: Path) -> None:
+    class FailingModel:
+        def complete(self, *, messages: Sequence[dict], tools: Sequence[dict]) -> AssistantResponse:
+            raise ModelError("provider unavailable")
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    store = SessionStore(tmp_path / "state")
+    session = store.create(workspace=workspace)
+    runtime = SessionRuntime(store, model_factory=lambda _: FailingModel())
+
+    try:
+        runtime.run_turn(session.id, "try once", stream=False)
+    except Exception:
+        pass
+    else:
+        raise AssertionError("expected model failure")
+
+    loaded = store.load(session.id)
+    assert loaded.transcript[-1]["type"] == "status"
+    assert loaded.transcript[-1]["kind"] == "error"
+    assert loaded.transcript[-1]["ok"] is False

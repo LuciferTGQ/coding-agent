@@ -88,13 +88,14 @@ class SessionStore:
         return session
 
     def save(self, session: Session) -> None:
-        if any("api_key" in key.casefold() for key in session.to_dict()):
+        payload = session.to_dict()
+        if _contains_credential_field(payload):
             raise ValueError("Credentials must not be stored in sessions")
         session.updated_at = _now()
         target = self._path(session.id)
         temporary = target.with_suffix(".json.tmp")
-        payload = json.dumps(session.to_dict(), ensure_ascii=False, indent=2)
-        temporary.write_text(payload + "\n", encoding="utf-8")
+        rendered = json.dumps(session.to_dict(), ensure_ascii=False, indent=2)
+        temporary.write_text(rendered + "\n", encoding="utf-8")
         os.replace(temporary, target)
 
     def load(self, session_id: str) -> Session:
@@ -130,3 +131,14 @@ class SessionStore:
 def title_from_message(message: str, limit: int = 48) -> str:
     single_line = " ".join(message.split())
     return single_line if len(single_line) <= limit else single_line[: limit - 1] + "…"
+
+
+def _contains_credential_field(value: Any) -> bool:
+    if isinstance(value, dict):
+        return any(
+            "api_key" in str(key).casefold() or _contains_credential_field(item)
+            for key, item in value.items()
+        )
+    if isinstance(value, list):
+        return any(_contains_credential_field(item) for item in value)
+    return False

@@ -110,6 +110,17 @@ class SessionRuntime:
         )
         try:
             result = runner.run(model_message)
+        except Exception as exc:
+            session.transcript.append(
+                {
+                    "type": "status",
+                    "kind": "error",
+                    "text": f"{type(exc).__name__}: {exc}",
+                    "ok": False,
+                    "timestamp": _timestamp(),
+                }
+            )
+            raise
         finally:
             session.model_context = context.to_dict()
             self.store.save(session)
