@@ -11,7 +11,6 @@ def word_frequencies(text: str) -> dict[str, int]:
     """Count every normalized word in *text*."""
 
     words = normalized_words(text)
-    # Intentional demo bug: the final normalized word is silently discarded.
     return dict(Counter(words[:-1]))
 
 
@@ -22,4 +21,3 @@ def top_words(text: str, limit: int = 5) -> list[tuple[str, int]]:
         raise ValueError("limit must be non-negative")
     counts = word_frequencies(text)
     return sorted(counts.items(), key=lambda item: (-item[1], item[0]))[:limit]
-
