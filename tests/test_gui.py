@@ -28,6 +28,7 @@ def test_window_loads_persistent_session_and_renders_event_cards(tmp_path: Path)
     assert window.title_label.text() == "GUI session"
     assert window.workspace_label.text() == str(workspace.resolve())
     assert window.model_combo.currentText() == "deepseek-v4-flash"
+    assert window.model_combo.count() == 1
     assert [window.effort_combo.itemText(i) for i in range(window.effort_combo.count())] == [
         "low",
         "high",

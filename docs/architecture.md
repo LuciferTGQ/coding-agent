@@ -9,7 +9,9 @@
 ## 2. 主数据流
 
 ```text
-CLI arguments
+Desktop GUI / CLI arguments
+    ↓
+SessionRuntime / runtime.py
     ↓
 Config ── API credential ──────────────┐
     ↓ workspace/runtime settings        │ (only credential edge)
@@ -28,7 +30,7 @@ Runtime composition                     ↓
        complete interaction block → next model request
 ```
 
-`runtime.py` 只是 composition root。Config 的 Key 只传入 `DeepSeekChatClient`；
+`runtime.py` 是 CLI composition root，`session_runtime.py` 是持久桌面会话的 composition root。Config 的 Key 只传入 `DeepSeekChatClient`；
 AgentRunner、ContextManager、Workspace、Registry 和 Tools 都拿不到凭据。
 
 ## 3. 模块职责
@@ -39,13 +41,13 @@ AgentRunner、ContextManager、Workspace、Registry 和 Tools 都拿不到凭据
 
 ### DeepSeekChatClient
 
-`llm.py` 输入 messages 与 tool definitions，输出统一的 `AssistantResponse`。它不执行工具，
+`llm.py` 输入 messages 与 tool definitions，输出统一的 `AssistantResponse`。非流式和流式入口共享同一结果结构；流式入口另外发出 `reasoning_delta` 与 `content_delta`，并聚合可能跨多个 chunk 的 tool call id、函数名和 JSON arguments。它不执行工具，
 也不决定循环。Thinking 模式通过 `extra_body={"thinking":{"type":"enabled"}}` 打开，
 `reasoning_effort` 可为 low/high/max。
 
 DeepSeek 官方协议要求：携带 tools 的 thinking 多轮中，assistant 的 `reasoning_content` 必须在
 后续请求完整回传，否则 API 会返回 400。因此客户端另外保存可重放的 `provider_message`，
-其中保留 `content`、`reasoning_content` 与 `tool_calls`；私有推理不进入 CLI 输出。
+其中保留 `content`、`reasoning_content` 与 `tool_calls`。CLI 不输出 reasoning；桌面端可以在本地折叠卡片中查看，持久化时也不会与 API 凭据混合。
 
 暂时性连接错误、timeout、429 和 5xx 最多有限重试并指数退避；认证、权限、请求格式等明确
 4xx 快速失败。异常中的 Key 会被替换为 `[REDACTED]`。
@@ -103,14 +105,23 @@ max_steps → controlled stop
 
 ### ContextManager
 
-system prompt 与原始 user task 是 stable context。每个 assistant tool-call message 加其全部
-tool results 组成一个 interaction block，裁剪时整体删除或保留。这条不变量同时保证：
+system prompt 是 stable context。每个用户请求开启一个 turn；期间每个 assistant tool-call message 加其全部 tool results 组成一个 interaction block，最终 assistant message关闭该 turn。裁剪时优先整体删除最旧的完整 turn；当前 turn 单独过长时，才整体删除较旧 interaction block。这条不变量同时保证：
 
 - 不留下孤立 `role=tool`；
 - 不留下缺少执行结果的 assistant tool call；
 - 保留下来的 DeepSeek provider fields 结构完整。
 
-当前实现使用字符数 soft budget，而非精确 tokenizer；超预算时从最旧完整块开始删除，并保留最近的交互。它没有调用模型生成摘要。对于小型和中型仓库，确定性 block pruning 足够稳定，并且避免了摘要失真和额外的模型调用。
+当前实现使用字符数 soft budget，而非精确 tokenizer；它没有调用模型生成摘要。对于小型和中型仓库，确定性的 turn/block pruning 足够稳定，并且避免了摘要失真和额外的模型调用。
+
+### SessionStore 与桌面层
+
+`SessionStore` 在 `~/.nju-coding-agent/sessions/` 中以单会话 JSON 文件保存 id、标题、Workspace、模型、reasoning effort、UTC 时间、完整 UI transcript 和序列化的模型上下文。写入先落到临时文件，再用原子 replace 提交；API Key 不属于 Session 数据结构。
+
+完整 transcript 和 provider context 是两份目的不同的数据：前者保留 reasoning、工具状态、diff、命令输出和最终回答，供 UI 恢复；后者由 `ContextManager` 按预算裁剪，只保留协议正确、足够继续推理的消息。销毁窗口并重新加载 Session 后，新用户消息会追加到恢复的 Context，而不是重新开始单轮任务。
+
+每个 Session 固定绑定一个 Workspace。已有历史时切换目录会创建新 Session，从结构上避免项目 A 的工具结果进入项目 B 的模型上下文。附件不会绕过这条边界：内部文件只记录相对路径；外部文件必须经确认复制进 Workspace，随后仍通过 `Workspace.resolve_path()` 和文件工具读取。
+
+Qt 主线程只处理窗口和控件。`AgentWorker` 在 `QThread` 中运行 `SessionRuntime`，用 queued signals 把增量事件送回 UI。Stop 设置协作式 cancellation flag；AgentRunner 只在模型步骤边界或完整 tool-call 组之前检查，避免强制杀死正在进行的文件写入或留下缺少对应 tool result 的 provider message。
 
 ### Verification Guard
 
@@ -177,6 +188,6 @@ Aider 的 Repo Map 用语法树和依赖图在大仓库中选择重要符号。�
 - 容器或 VM Sandbox、网络隔离、资源 quota 与细粒度权限；
 - token-aware context、model-assisted compaction、语义摘要和 retrieval cache；
 - Aider 风格 Repo Map、LSP、AST/patch 编辑；
-- session persistence、observability、trajectory replay 与系统化 evaluation suite；
+- 更细粒度的 trajectory replay、会话导入导出与系统化 evaluation suite；
 - Responses API 和更多 provider adapter；
 - 在不破坏单循环可读性的前提下增加用户审批与可恢复 checkpoint。

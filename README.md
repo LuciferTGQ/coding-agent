@@ -1,12 +1,14 @@
 # NJU Coding Agent
 
-NJU Coding Agent 是一个轻量的 CLI 编程智能体。它使用 DeepSeek V4 Flash 的原生 Tool Calling，直接在本地项目中浏览代码、修改文件并运行测试。
+NJU Coding Agent 是一个轻量、自实现 Harness 的本地 Coding Agent。它提供持久化桌面界面和 CLI，使用 DeepSeek V4 的原生 Tool Calling，在选定项目中浏览代码、修改文件并运行测试。
 
 项目的 Harness 从基础模型 API 搭建：对话历史、工具注册、参数校验、本地执行、上下文裁剪、错误反馈和循环终止都在仓库内显式实现。没有引入 Agent 框架，也不依赖服务端文件工具或远程代码执行。
 
 ## 核心能力
 
 - 在单 Agent 循环中完成“观察、行动、获取反馈、继续调整”的多步编程任务。
+- 以多轮会话持续处理同一 Workspace，关闭应用后可恢复完整对话和模型上下文。
+- 流式展示回答、可折叠 reasoning 和带状态的工具卡片；模型与工具运行在后台线程。
 - 通过六个受限工具浏览、搜索、读取、写入、精确编辑文件并执行命令。
 - 将 stdout、stderr、退出码和超时信息回传给模型，让失败成为下一步决策的输入。
 - 按完整的 assistant-tool 交互块管理上下文，避免裁剪后出现残缺的 Tool Calling 协议。
@@ -16,18 +18,18 @@ NJU Coding Agent 是一个轻量的 CLI 编程智能体。它使用 DeepSeek V4 
 ## 数据流
 
 ```text
-CLI / Config
-    ↓
+Desktop GUI / CLI
+       ↓
+SessionRuntime ── SessionStore (~/.nju-coding-agent)
+       ↓                 ↑ full transcript + model context
 AgentRunner ←→ ContextManager
-    ↓                ↑
-DeepSeek Chat Client
-    ↓ tool_calls     ↑ assistant + tool results
-ToolRegistry
-    ↓
-Workspace / local subprocess
+       ↓                ↑
+DeepSeek Chat Client (streaming or non-streaming)
+       ↓ tool_calls     ↑ assistant + tool results
+ToolRegistry → Workspace / local subprocess
 ```
 
-`AgentRunner` 只负责编排。模型适配、上下文、工具解析和环境操作分属不同模块，因此可以用 FakeModel 和临时 Workspace 分别测试。更完整的数据流和取舍见 [架构文档](docs/architecture.md)。
+`AgentRunner` 仍只负责编排。桌面层通过 `SessionRuntime` 复用同一 Harness，并将完整 UI transcript 与有预算的 provider context 分开持久化。模型适配、上下文、工具解析和环境操作分属不同模块，因此可以用 FakeModel 和临时 Workspace 分别测试。更完整的数据流和取舍见 [架构文档](docs/architecture.md)。
 
 ## 安装
 
@@ -64,7 +66,25 @@ Harness 还支持以下运行参数：
 - `CODING_AGENT_TOOL_OUTPUT_LIMIT`：单次工具结果字符限额，默认 12000。
 - `CODING_AGENT_CONTEXT_BUDGET`：上下文近似软预算，默认 120000 字符。
 
-## 使用
+## 桌面端使用
+
+启动持久化桌面应用：
+
+```powershell
+python -m coding_agent.gui
+# 或
+coding-agent-gui
+```
+
+点击 **New conversation** 选择项目目录，然后输入任务。左侧会话列表可恢复历史；每个会话固定绑定一个 Workspace。已有对话切换 Workspace 时，应用会提示并创建新会话，防止不同项目的上下文混合。
+
+模型输出会逐步显示。Reasoning 默认折叠，read/search/edit/run 等调用显示为工具卡片，参数、diff 和命令输出可按需展开。点击 **Stop** 后，Agent 会在下一步骤边界或完整 tool-call 组执行完毕后停止，不会强制终止正在写文件的 handler。
+
+附件仅支持 UTF-8 文本。Workspace 内文件只把相对路径加入任务，不把全文直接塞进提示；Workspace 外文件必须经用户确认后复制到 `.agent-attachments/`，仍由原有路径边界和工具读取规则管理。
+
+桌面会话以 JSON 保存在用户目录 `~/.nju-coding-agent/sessions/`，不写入仓库或目标 Workspace。存储内容包括会话设置、完整 transcript 和恢复所需的 provider context，不包括 API Key。
+
+## CLI 使用
 
 ```powershell
 coding-agent --workspace .\path\to\project "Fix the failing tests"
@@ -94,7 +114,9 @@ python -m coding_agent --workspace .\path\to\project --max-steps 20 `
 
 ## Context 与 Verification Guard
 
-`ContextManager` 始终保留 system prompt 和原始任务。assistant tool call 与对应的全部 tool results 组成一个不可拆分的 interaction block；超过软预算时，系统只删除最旧的完整块。这样不会留下孤立的 tool message，DeepSeek thinking 模式所需的 provider fields 也会随块完整保留。
+`ContextManager` 始终保留 system prompt。每个用户请求、期间的 assistant/tool 交互及最终回答形成一轮；assistant tool call 与对应的全部 tool results 仍是不可拆分的 interaction block。超过软预算时，系统优先删除最旧的完整用户轮次；单轮过长时才删除其中最旧的完整工具块。这样不会留下孤立的 tool message，DeepSeek thinking 模式所需的 provider fields 也会随块完整保留。
+
+桌面 transcript 不受模型上下文预算影响，因此 UI 可以保留完整历史，而传给模型的上下文仍保持有界。DeepSeek 的 streaming chunks 会规范化为 `reasoning_delta` 与 `content_delta`，再聚合成与非流式路径相同的 `AssistantResponse`；thinking + tools 所需的 `reasoning_content` 会在后续请求中原样重放。
 
 成功写入或编辑后，Harness 会记录一个未验证的 Workspace revision。如果模型未执行合适的 test、build、lint 或程序就直接结束，Verification Guard 会提醒它继续验证。同一 revision 只提醒一次；确实没有可用的自动验证时，模型可以说明原因后结束。
 
@@ -117,14 +139,14 @@ python -m pytest
 python -m compileall -q src scripts
 ```
 
-真实协议 smoke 需要显式开启：
+真实 streaming 协议 smoke 需要显式开启：
 
 ```powershell
 $env:RUN_LIVE_TESTS = "1"
 python scripts/live_smoke.py
 ```
 
-该脚本验证 thinking、tool call、本地 tool result 与下一轮 final response，不输出模型的私有推理或 API 凭据。
+该脚本验证 streaming thinking、tool call、本地 tool result 与下一轮 final response，不输出 reasoning 原文或 API 凭据。
 
 ## 可重复 Demo
 
@@ -147,8 +169,9 @@ python -m coding_agent --workspace .demo-workspace --max-steps 20 `
 
 ## 已知限制
 
-- 目前只实现 DeepSeek Chat Completions provider。
+- 目前只实现 DeepSeek Chat Completions provider，桌面模型列表只提供已按该协议验证的 `deepseek-v4-flash`。
 - Context soft budget 使用字符数近似 token 数，不做模型摘要。
-- 当前没有 Repo Map、RAG、持久会话、LSP 或多 Agent 编排。
+- 当前没有 Repo Map、RAG、LSP 或多 Agent 编排。
+- Stop 是协作式边界停止，不会中断正在进行的网络请求或单个工具 handler。
 - Exact replacement 适合小而精确的变更，不适合大规模结构化重构。
 - 本地 command filtering 不能替代容器、VM 或其他 OS 级隔离。

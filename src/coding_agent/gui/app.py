@@ -34,7 +34,7 @@ from coding_agent.session_runtime import SessionRuntime
 from coding_agent.sessions import Session, SessionStore
 
 
-MODELS = ("deepseek-v4-flash", "deepseek-v4-pro")
+MODELS = ("deepseek-v4-flash",)
 EFFORTS = ("low", "high", "max")
 
 
