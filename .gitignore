@@ -1,0 +1,23 @@
+# Local credentials
+api.txt
+.env
+.env.*
+!.env.example
+
+# Python artifacts
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.coverage
+htmlcov/
+.venv/
+venv/
+build/
+dist/
+*.egg-info/
+
+# Local tooling and temporary output
+.idea/
+.vscode/
+tmp/
+推免考核题目学生版.pdf
