@@ -15,14 +15,16 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from coding_agent.gui.i18n import tr
+
 
 class MessageBubble(QFrame):
-    def __init__(self, role: str, text: str = "") -> None:
+    def __init__(self, role: str, text: str = "", language: str = "zh") -> None:
         super().__init__()
         self.setObjectName("userBubble" if role == "user" else "assistantBubble")
         layout = QVBoxLayout(self)
         layout.setContentsMargins(14, 10, 14, 10)
-        heading = QLabel("You" if role == "user" else "Agent")
+        heading = QLabel(tr(language, "you") if role == "user" else tr(language, "agent"))
         heading.setObjectName("bubbleHeading")
         self.body = QLabel(text)
         self.body.setWordWrap(True)
@@ -84,13 +86,20 @@ class CollapsibleCard(QFrame):
 
 
 class ToolCard(CollapsibleCard):
-    def __init__(self, name: str, summary: str, call_id: str | None = None) -> None:
-        super().__init__(f"●  {name}  ·  running", summary)
+    def __init__(
+        self,
+        name: str,
+        summary: str,
+        call_id: str | None = None,
+        language: str = "zh",
+    ) -> None:
+        super().__init__(f"●  {name}  ·  {tr(language, 'running')}", summary)
         self.name = name
         self.call_id = call_id
+        self.language = language
 
     def set_result(self, text: str, ok: bool) -> None:
-        status = "completed" if ok else "failed"
+        status = tr(self.language, "completed" if ok else "failed")
         marker = "✓" if ok else "×"
         self.toggle.setText(f"{marker}  {self.name}  ·  {status}")
         existing = self.detail.toPlainText()
@@ -101,8 +110,9 @@ class ToolCard(CollapsibleCard):
 
 
 class ConversationView(QScrollArea):
-    def __init__(self) -> None:
+    def __init__(self, language: str = "zh") -> None:
         super().__init__()
+        self.language = language
         self.setWidgetResizable(True)
         self.setFrameShape(QFrame.NoFrame)
         self.container = QWidget()
@@ -132,25 +142,25 @@ class ConversationView(QScrollArea):
     def add_user(self, text: str, attachments: list[str] | None = None) -> None:
         rendered = text
         if attachments:
-            rendered += "\n\nFiles: " + ", ".join(attachments)
-        self.add_item(MessageBubble("user", rendered), align_right=True)
+            rendered += f"\n\n{tr(self.language, 'files')}: " + ", ".join(attachments)
+        self.add_item(MessageBubble("user", rendered, self.language), align_right=True)
         self._reset_stream_targets()
 
     def append_reasoning(self, delta: str) -> None:
         if self._reasoning is None:
-            self._reasoning = CollapsibleCard("Reasoning", "")
+            self._reasoning = CollapsibleCard(tr(self.language, "reasoning"), "")
             self.add_item(self._reasoning)
         self._reasoning.append_text(delta)
 
     def append_assistant(self, delta: str) -> None:
         if self._assistant is None:
-            self._assistant = MessageBubble("assistant", "")
+            self._assistant = MessageBubble("assistant", "", self.language)
             self.add_item(self._assistant)
         self._assistant.append_text(delta)
 
     def finish_assistant(self, text: str) -> None:
         if self._assistant is None:
-            self._assistant = MessageBubble("assistant", text)
+            self._assistant = MessageBubble("assistant", text, self.language)
             self.add_item(self._assistant)
         else:
             self._assistant.set_text(text)
@@ -158,7 +168,7 @@ class ConversationView(QScrollArea):
         self._assistant = None
 
     def add_tool(self, name: str, summary: str, call_id: str | None) -> None:
-        card = ToolCard(name, summary, call_id)
+        card = ToolCard(name, summary, call_id, self.language)
         self.add_item(card)
         if call_id:
             self._tools[call_id] = card
@@ -168,16 +178,28 @@ class ConversationView(QScrollArea):
     def finish_tool(self, name: str, text: str, ok: bool, call_id: str | None) -> None:
         card = self._tools.get(call_id or "")
         if card is None:
-            card = ToolCard(name, "", call_id)
+            card = ToolCard(name, "", call_id, self.language)
             self.add_item(card)
         card.set_result(text, ok)
 
     def add_status(self, text: str, ok: bool | None = None) -> None:
         label = QLabel(text)
         label.setWordWrap(True)
+        label.setMinimumWidth(420)
+        label.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Minimum)
+        label.setMinimumHeight(max(28, label.sizeHint().height()))
         label.setObjectName("statusLabel" if ok is not False else "errorLabel")
         self.add_item(label)
         self._reset_stream_targets()
+
+    def add_event_status(
+        self, kind: str, text: str, ok: bool | None = None
+    ) -> None:
+        if kind == "verification":
+            text = tr(self.language, "verification_status")
+        elif kind == "stopped":
+            text = tr(self.language, "stopped_status")
+        self.add_status(text, ok)
 
     def render(self, transcript: list[dict]) -> None:
         self.clear_transcript()
@@ -204,7 +226,11 @@ class ConversationView(QScrollArea):
                     item.get("call_id"),
                 )
             elif kind == "status":
-                self.add_status(str(item.get("text", "")), item.get("ok"))
+                self.add_event_status(
+                    str(item.get("kind", "")),
+                    str(item.get("text", "")),
+                    item.get("ok"),
+                )
         self.layout.activate()
         self.container.adjustSize()
         self._scroll_bottom()

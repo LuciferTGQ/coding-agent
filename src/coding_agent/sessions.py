@@ -26,6 +26,7 @@ class Session:
     workspace: str
     model: str = "deepseek-v4-flash"
     reasoning_effort: str = "high"
+    preferred_language: str = "zh"
     created_at: str = field(default_factory=_now)
     updated_at: str = field(default_factory=_now)
     transcript: list[JsonObject] = field(default_factory=list)
@@ -43,14 +44,18 @@ class Session:
             raise ValueError("Session metadata is malformed")
         transcript = payload.get("transcript", [])
         context = payload.get("model_context")
+        preferred_language = payload.get("preferred_language", "zh")
         if not isinstance(transcript, list) or (context is not None and not isinstance(context, dict)):
             raise ValueError("Session conversation data is malformed")
+        if preferred_language not in {"zh", "en"}:
+            preferred_language = "zh"
         return cls(
             id=payload["id"],
             title=payload["title"],
             workspace=payload["workspace"],
             model=payload["model"],
             reasoning_effort=payload["reasoning_effort"],
+            preferred_language=preferred_language,
             created_at=str(payload.get("created_at", _now())),
             updated_at=str(payload.get("updated_at", _now())),
             transcript=transcript,
@@ -73,6 +78,7 @@ class SessionStore:
         title: str = "New conversation",
         model: str = "deepseek-v4-flash",
         reasoning_effort: str = "high",
+        preferred_language: str = "zh",
     ) -> Session:
         resolved = Path(workspace).expanduser().resolve()
         if not resolved.is_dir():
@@ -83,6 +89,7 @@ class SessionStore:
             workspace=str(resolved),
             model=model,
             reasoning_effort=reasoning_effort,
+            preferred_language=(preferred_language if preferred_language in {"zh", "en"} else "zh"),
         )
         self.save(session)
         return session

@@ -86,6 +86,11 @@ class ContextManager:
         self._turns.append(ContextTurn([ContextBlock(({"role": "user", "content": user_content},))]))
         self._prune()
 
+    def set_system_prompt(self, content: str) -> None:
+        """Update stable instructions without disturbing conversation turns."""
+
+        self._system = {"role": "system", "content": content}
+
     def add_interaction(
         self, assistant_message: JsonObject, tool_messages: Iterable[JsonObject]
     ) -> None:

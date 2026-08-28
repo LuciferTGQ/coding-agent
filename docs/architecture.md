@@ -117,6 +117,8 @@ system prompt 是 stable context。每个用户请求开启一个 turn；期间�
 
 `SessionStore` 在 `~/.nju-coding-agent/sessions/` 中以单会话 JSON 文件保存 id、标题、Workspace、模型、reasoning effort、UTC 时间、完整 UI transcript 和序列化的模型上下文。写入先落到临时文件，再用原子 replace 提交；API Key 不属于 Session 数据结构。
 
+GUI 文案由一个集中维护的 `zh/en` 映射提供，不使用额外 locale framework。`settings.json` 只保存语言、默认模型、默认 reasoning effort 和默认最大步骤；语言变更在下次启动时生效，避免运行中重建历史控件。界面语言也会更新同一个 `ContextManager` 的 stable system prompt，只约束用户可见交流语言，不改变 Tool 名称、JSON Schema 或 provider message 协议。
+
 完整 transcript 和 provider context 是两份目的不同的数据：前者保留 reasoning、工具状态、diff、命令输出和最终回答，供 UI 恢复；后者由 `ContextManager` 按预算裁剪，只保留协议正确、足够继续推理的消息。销毁窗口并重新加载 Session 后，新用户消息会追加到恢复的 Context，而不是重新开始单轮任务。
 
 每个 Session 固定绑定一个 Workspace。已有历史时切换目录会创建新 Session，从结构上避免项目 A 的工具结果进入项目 B 的模型上下文。附件不会绕过这条边界：内部文件只记录相对路径；外部文件必须经确认复制进 Workspace，随后仍通过 `Workspace.resolve_path()` 和文件工具读取。

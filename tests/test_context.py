@@ -83,3 +83,13 @@ def test_completed_turns_round_trip_and_old_turns_prune_atomically() -> None:
     assert messages[-2]["role"] == "user"
     assert messages[-1]["role"] == "assistant"
     assert restored.turn_count == 1
+
+
+def test_system_prompt_can_change_without_disturbing_turns() -> None:
+    context = ContextManager(system_prompt="English", original_task="inspect")
+    context.set_system_prompt("Chinese")
+
+    assert context.messages() == [
+        {"role": "system", "content": "Chinese"},
+        {"role": "user", "content": "inspect"},
+    ]

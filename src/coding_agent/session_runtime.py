@@ -23,10 +23,19 @@ ModelFactory = Callable[[Config], ModelClient]
 class SessionRuntime:
     """Run agent turns and persist both UI transcript and resumable model context."""
 
-    def __init__(self, store: SessionStore, model_factory: ModelFactory | None = None) -> None:
+    def __init__(
+        self,
+        store: SessionStore,
+        model_factory: ModelFactory | None = None,
+        *,
+        language: str | None = None,
+        max_steps: int | None = None,
+    ) -> None:
         self.store = store
         self._requires_api_key = model_factory is None
         self.model_factory = model_factory or self._default_model
+        self.language = language if language in {"zh", "en"} else None
+        self.max_steps = max_steps
 
     def run_turn(
         self,
@@ -39,6 +48,8 @@ class SessionRuntime:
         stream: bool = True,
     ) -> AgentResult:
         session = self.store.load(session_id)
+        response_language = self.language or session.preferred_language
+        session.preferred_language = response_language
         workspace = Workspace(Path(session.workspace))
         attached = self._validate_attachments(workspace, attachments)
         model_message = message.strip()
@@ -65,15 +76,21 @@ class SessionRuntime:
             workspace=session.workspace,
             model=session.model,
             reasoning_effort=session.reasoning_effort,
+            max_steps=self.max_steps,
             require_api_key=self._requires_api_key,
         )
         context = (
             ContextManager.from_dict(session.model_context)
             if session.model_context
             else ContextManager(
-                system_prompt=build_system_prompt(workspace.root),
+                system_prompt=build_system_prompt(
+                    workspace.root, response_language=response_language
+                ),
                 soft_budget=config.context_soft_budget,
             )
+        )
+        context.set_system_prompt(
+            build_system_prompt(workspace.root, response_language=response_language)
         )
         registry = ToolRegistry(
             [

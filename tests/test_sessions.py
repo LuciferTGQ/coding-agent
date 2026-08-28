@@ -132,3 +132,50 @@ def test_model_failure_is_persisted_as_status(tmp_path: Path) -> None:
     assert loaded.transcript[-1]["type"] == "status"
     assert loaded.transcript[-1]["kind"] == "error"
     assert loaded.transcript[-1]["ok"] is False
+
+
+def test_gui_language_updates_stable_prompt_without_changing_protocol(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    store = SessionStore(tmp_path / "state")
+    session = store.create(workspace=workspace)
+    model = FakeModel(["完成"])
+    configs = []
+
+    def factory(config):
+        configs.append(config)
+        return model
+
+    SessionRuntime(
+        store, model_factory=factory, language="zh", max_steps=9
+    ).run_turn(
+        session.id, "检查项目", stream=False
+    )
+
+    system = model.requests[0][0]
+    assert system["role"] == "system"
+    assert "当前首选的用户交流语言为中文" in system["content"]
+    assert "list_files" in system["content"]
+    assert configs[0].max_steps == 9
+
+
+def test_switching_session_language_keeps_workspace_and_conversation(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    store = SessionStore(tmp_path / "state")
+    session = store.create(workspace=workspace, preferred_language="zh")
+    model = FakeModel(["第一轮", "Second turn"])
+
+    SessionRuntime(store, model_factory=lambda _: model, language="zh").run_turn(
+        session.id, "Please inspect this project.", stream=False
+    )
+    SessionRuntime(store, model_factory=lambda _: model, language="en").run_turn(
+        session.id, "帮我继续检查", stream=False
+    )
+
+    loaded = store.load(session.id)
+    assert loaded.preferred_language == "en"
+    assert loaded.workspace == str(workspace.resolve())
+    assert len(loaded.model_context["turns"]) == 2
+    assert "preferred user-facing language is English" in model.requests[1][0]["content"]
+    assert model.requests[1][1]["content"] == "Please inspect this project."

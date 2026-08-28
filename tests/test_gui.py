@@ -9,6 +9,7 @@ from PySide6.QtWidgets import QApplication
 
 from coding_agent.agent import AgentEvent
 from coding_agent.gui.app import MainWindow
+from coding_agent.gui.settings import AppSettings, SettingsStore
 from coding_agent.sessions import SessionStore
 
 
@@ -28,6 +29,8 @@ def test_window_loads_persistent_session_and_renders_event_cards(tmp_path: Path)
     assert window.title_label.text() == "GUI session"
     assert window.workspace_label.text() == str(workspace.resolve())
     assert window.model_combo.currentText() == "deepseek-v4-flash"
+    assert window.new_button.text() == "＋  新建对话"
+    assert window.settings_button.text() == "设置"
     assert window.model_combo.count() == 1
     assert [window.effort_combo.itemText(i) for i in range(window.effort_combo.count())] == [
         "low",
@@ -44,7 +47,7 @@ def test_window_loads_persistent_session_and_renders_event_cards(tmp_path: Path)
     window._handle_event(AgentEvent("final", 2, "Done"))
 
     assert "c1" in window.conversation._tools
-    assert "completed" in window.conversation._tools["c1"].toggle.text()
+    assert "已完成" in window.conversation._tools["c1"].toggle.text()
     window.close()
     app.processEvents()
 
@@ -54,6 +57,26 @@ def test_empty_window_keeps_new_conversation_available(tmp_path: Path) -> None:
     window = MainWindow(SessionStore(tmp_path / "empty-state"))
     assert window.new_button.isEnabled()
     assert not window.send_button.isEnabled()
+    status = window.conversation.layout.itemAt(0).widget()
+    assert status.text() == "新建对话并选择一个项目工作区。"
+    assert status.height() >= status.minimumHeight()
+    window.close()
+    app.processEvents()
+
+
+def test_saved_english_setting_applies_to_next_window(tmp_path: Path) -> None:
+    app = _app()
+    store = SessionStore(tmp_path / "english-state")
+    SettingsStore(store.root).save(
+        AppSettings(language="en", reasoning_effort="low", max_steps=17)
+    )
+
+    window = MainWindow(store)
+
+    assert window.new_button.text() == "＋  New conversation"
+    assert window.settings_button.text() == "Settings"
+    assert window.runtime.language == "en"
+    assert window.runtime.max_steps == 17
     window.close()
     app.processEvents()
 

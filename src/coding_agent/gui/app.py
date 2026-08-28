@@ -12,7 +12,10 @@ from PySide6.QtGui import QCloseEvent, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QApplication,
     QComboBox,
+    QDialog,
+    QDialogButtonBox,
     QFileDialog,
+    QFormLayout,
     QFrame,
     QHBoxLayout,
     QLabel,
@@ -22,27 +25,81 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QPushButton,
     QSplitter,
+    QSpinBox,
     QTextEdit,
     QVBoxLayout,
     QWidget,
 )
 
 from coding_agent.agent import AgentEvent, AgentResult
+from coding_agent.gui.i18n import tr
+from coding_agent.gui.settings import (
+    MODELS,
+    REASONING_EFFORTS,
+    AppSettings,
+    SettingsStore,
+)
 from coding_agent.gui.widgets import ConversationView
 from coding_agent.gui.worker import AgentWorker
 from coding_agent.session_runtime import SessionRuntime
 from coding_agent.sessions import Session, SessionStore
 
 
-MODELS = ("deepseek-v4-flash",)
-EFFORTS = ("low", "high", "max")
+class SettingsDialog(QDialog):
+    def __init__(self, settings: AppSettings, language: str, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._language = language
+        self.setWindowTitle(tr(language, "settings_title"))
+        layout = QVBoxLayout(self)
+        form = QFormLayout()
+        self.language_combo = QComboBox()
+        self.language_combo.addItem(tr(language, "chinese"), "zh")
+        self.language_combo.addItem(tr(language, "english"), "en")
+        self.language_combo.setCurrentIndex(
+            max(0, self.language_combo.findData(settings.language))
+        )
+        self.model_combo = QComboBox()
+        self.model_combo.addItems(MODELS)
+        self.model_combo.setCurrentText(settings.model)
+        self.effort_combo = QComboBox()
+        self.effort_combo.addItems(REASONING_EFFORTS)
+        self.effort_combo.setCurrentText(settings.reasoning_effort)
+        self.steps_spin = QSpinBox()
+        self.steps_spin.setRange(1, 200)
+        self.steps_spin.setValue(settings.max_steps)
+        form.addRow(tr(language, "language"), self.language_combo)
+        form.addRow(tr(language, "default_model"), self.model_combo)
+        form.addRow(tr(language, "default_reasoning"), self.effort_combo)
+        form.addRow(tr(language, "default_max_steps"), self.steps_spin)
+        buttons = QDialogButtonBox(QDialogButtonBox.Save | QDialogButtonBox.Cancel)
+        buttons.button(QDialogButtonBox.Save).setText(tr(language, "save"))
+        buttons.button(QDialogButtonBox.Cancel).setText(tr(language, "cancel"))
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addLayout(form)
+        layout.addWidget(buttons)
+
+    def values(self) -> AppSettings:
+        return AppSettings(
+            language=str(self.language_combo.currentData()),
+            model=self.model_combo.currentText(),
+            reasoning_effort=self.effort_combo.currentText(),
+            max_steps=self.steps_spin.value(),
+        )
 
 
 class MainWindow(QMainWindow):
     def __init__(self, store: SessionStore | None = None) -> None:
         super().__init__()
         self.store = store or SessionStore()
-        self.runtime = SessionRuntime(self.store)
+        self.settings_store = SettingsStore(self.store.root)
+        self.settings = self.settings_store.load()
+        self.language = self.settings.language
+        self.runtime = SessionRuntime(
+            self.store,
+            language=self.language,
+            max_steps=self.settings.max_steps,
+        )
         self.current_session: Session | None = None
         self.worker: AgentWorker | None = None
         self.attachments: list[str] = []
@@ -63,7 +120,7 @@ class MainWindow(QMainWindow):
         side_layout.setContentsMargins(14, 18, 14, 14)
         brand = QLabel("CODING AGENT")
         brand.setObjectName("brand")
-        self.new_button = QPushButton("＋  New conversation")
+        self.new_button = QPushButton(tr(self.language, "new_conversation"))
         self.new_button.setObjectName("primaryButton")
         self.new_button.clicked.connect(self.new_session)
         self.session_list = QListWidget()
@@ -71,12 +128,15 @@ class MainWindow(QMainWindow):
         self.session_list.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.session_list.setTextElideMode(Qt.ElideRight)
         self.session_list.currentItemChanged.connect(self._session_selected)
-        self.delete_button = QPushButton("Delete conversation")
+        self.settings_button = QPushButton(tr(self.language, "settings"))
+        self.settings_button.clicked.connect(self.open_settings)
+        self.delete_button = QPushButton(tr(self.language, "delete_conversation"))
         self.delete_button.clicked.connect(self.delete_session)
         side_layout.addWidget(brand)
         side_layout.addWidget(self.new_button)
         side_layout.addSpacing(8)
         side_layout.addWidget(self.session_list, 1)
+        side_layout.addWidget(self.settings_button)
         side_layout.addWidget(self.delete_button)
 
         right = QWidget()
@@ -88,49 +148,53 @@ class MainWindow(QMainWindow):
         header.setObjectName("header")
         header_layout = QVBoxLayout(header)
         header_layout.setContentsMargins(24, 13, 24, 12)
-        self.title_label = QLabel("Start a conversation")
+        self.title_label = QLabel(tr(self.language, "start_conversation"))
         self.title_label.setObjectName("title")
-        self.workspace_label = QLabel("Choose a workspace to begin")
+        self.workspace_label = QLabel(tr(self.language, "choose_workspace_to_begin"))
         self.workspace_label.setObjectName("muted")
         header_layout.addWidget(self.title_label)
         header_layout.addWidget(self.workspace_label)
 
-        self.conversation = ConversationView()
+        self.conversation = ConversationView(self.language)
 
         composer = QFrame()
         composer.setObjectName("composer")
         composer_layout = QVBoxLayout(composer)
         composer_layout.setContentsMargins(20, 12, 20, 16)
         composer_layout.setSpacing(8)
-        self.workspace_button = QPushButton("Workspace: not selected")
+        self.workspace_button = QPushButton(tr(self.language, "workspace_unselected"))
         self.workspace_button.setObjectName("workspaceButton")
         self.workspace_button.clicked.connect(self.change_workspace)
         self.editor = QTextEdit()
-        self.editor.setPlaceholderText("Describe a task or ask a follow-up…")
+        self.editor.setPlaceholderText(tr(self.language, "input_placeholder"))
         self.editor.setAcceptRichText(False)
         self.editor.setMinimumHeight(92)
         self.editor.setMaximumHeight(180)
         controls = QHBoxLayout()
-        self.attach_button = QPushButton("＋ Attach files")
+        self.attach_button = QPushButton(tr(self.language, "attach_files"))
         self.attach_button.clicked.connect(self.attach_files)
         self.attachment_label = QLabel("")
         self.attachment_label.setObjectName("muted")
         self.model_combo = QComboBox()
         self.model_combo.addItems(MODELS)
+        self.model_combo.setCurrentText(self.settings.model)
         self.model_combo.currentTextChanged.connect(self._settings_changed)
         self.effort_combo = QComboBox()
-        self.effort_combo.addItems(EFFORTS)
+        self.effort_combo.addItems(REASONING_EFFORTS)
+        self.effort_combo.setCurrentText(self.settings.reasoning_effort)
         self.effort_combo.currentTextChanged.connect(self._settings_changed)
-        self.stop_button = QPushButton("Stop")
+        self.stop_button = QPushButton(tr(self.language, "stop"))
         self.stop_button.setObjectName("stopButton")
         self.stop_button.setVisible(False)
         self.stop_button.clicked.connect(self.stop_run)
-        self.send_button = QPushButton("Send")
+        self.send_button = QPushButton(tr(self.language, "send"))
         self.send_button.setObjectName("primaryButton")
         self.send_button.clicked.connect(self.send_message)
         controls.addWidget(self.attach_button)
         controls.addWidget(self.attachment_label, 1)
+        controls.addWidget(QLabel(tr(self.language, "model")))
         controls.addWidget(self.model_combo)
+        controls.addWidget(QLabel(tr(self.language, "reasoning_effort")))
         controls.addWidget(self.effort_combo)
         controls.addWidget(self.stop_button)
         controls.addWidget(self.send_button)
@@ -175,11 +239,17 @@ class MainWindow(QMainWindow):
         if self.worker:
             return
         directory = QFileDialog.getExistingDirectory(
-            self, "Choose workspace", str(Path.cwd())
+            self, tr(self.language, "choose_workspace"), str(Path.cwd())
         )
         if not directory:
             return
-        session = self.store.create(workspace=directory)
+        session = self.store.create(
+            workspace=directory,
+            title=tr(self.language, "new_session_title"),
+            model=self.settings.model,
+            reasoning_effort=self.settings.reasoning_effort,
+            preferred_language=self.language,
+        )
         self.refresh_sessions(session.id)
         self.editor.setFocus()
 
@@ -188,8 +258,8 @@ class MainWindow(QMainWindow):
             return
         answer = QMessageBox.question(
             self,
-            "Delete conversation",
-            f'Delete “{self.current_session.title}”? Workspace files are not changed.',
+            tr(self.language, "delete_title"),
+            tr(self.language, "delete_question", title=self.current_session.title),
         )
         if answer == QMessageBox.Yes:
             self.store.delete(self.current_session.id)
@@ -199,9 +269,14 @@ class MainWindow(QMainWindow):
     def load_session(self, session_id: str) -> None:
         self.current_session = self.store.load(session_id)
         session = self.current_session
+        if session.preferred_language != self.language:
+            session.preferred_language = self.language
+            self.store.save(session)
         self.title_label.setText(session.title)
         self.workspace_label.setText(session.workspace)
-        self.workspace_button.setText(f"Workspace: {session.workspace}")
+        self.workspace_button.setText(
+            tr(self.language, "workspace_value", workspace=session.workspace)
+        )
         self.model_combo.blockSignals(True)
         self.effort_combo.blockSignals(True)
         self.model_combo.setCurrentText(session.model)
@@ -217,7 +292,9 @@ class MainWindow(QMainWindow):
         if self.worker:
             return
         initial = self.current_session.workspace if self.current_session else str(Path.cwd())
-        directory = QFileDialog.getExistingDirectory(self, "Choose workspace", initial)
+        directory = QFileDialog.getExistingDirectory(
+            self, tr(self.language, "choose_workspace"), initial
+        )
         if not directory:
             return
         if self.current_session and Path(directory).resolve() == Path(self.current_session.workspace):
@@ -225,29 +302,48 @@ class MainWindow(QMainWindow):
         if self.current_session and self.current_session.transcript:
             answer = QMessageBox.warning(
                 self,
-                "Start a new conversation?",
-                "A conversation is bound to one workspace. Changing it creates a new conversation so prior model context cannot cross workspace boundaries.",
+                tr(self.language, "change_workspace_title"),
+                tr(self.language, "change_workspace_message"),
                 QMessageBox.Yes | QMessageBox.Cancel,
                 QMessageBox.Cancel,
             )
             if answer != QMessageBox.Yes:
                 return
-            session = self.store.create(workspace=directory)
+            session = self.store.create(
+                workspace=directory,
+                title=tr(self.language, "new_session_title"),
+                model=self.settings.model,
+                reasoning_effort=self.settings.reasoning_effort,
+                preferred_language=self.language,
+            )
         elif self.current_session:
             self.current_session.workspace = str(Path(directory).resolve())
             self.current_session.model_context = None
             self.store.save(self.current_session)
             session = self.current_session
         else:
-            session = self.store.create(workspace=directory)
+            session = self.store.create(
+                workspace=directory,
+                title=tr(self.language, "new_session_title"),
+                model=self.settings.model,
+                reasoning_effort=self.settings.reasoning_effort,
+                preferred_language=self.language,
+            )
         self.refresh_sessions(session.id)
 
     def attach_files(self) -> None:
         if not self.current_session or self.worker:
-            QMessageBox.information(self, "Choose a workspace", "Create a conversation first.")
+            QMessageBox.information(
+                self,
+                tr(self.language, "choose_workspace"),
+                tr(self.language, "create_first"),
+            )
             return
         files, _ = QFileDialog.getOpenFileNames(
-            self, "Attach UTF-8 files", self.current_session.workspace, "Text files (*)"
+            self,
+            tr(self.language, "attach_title"),
+            self.current_session.workspace,
+            tr(self.language, "text_files"),
         )
         root = Path(self.current_session.workspace).resolve()
         for raw in files:
@@ -255,15 +351,19 @@ class MainWindow(QMainWindow):
             try:
                 source.read_text(encoding="utf-8")
             except (OSError, UnicodeDecodeError) as exc:
-                QMessageBox.warning(self, "Attachment rejected", f"{source.name}: {exc}")
+                QMessageBox.warning(
+                    self,
+                    tr(self.language, "attachment_rejected"),
+                    f"{source.name}: {exc}",
+                )
                 continue
             if source.is_relative_to(root):
                 relative = source.relative_to(root).as_posix()
             else:
                 answer = QMessageBox.question(
                     self,
-                    "Copy into workspace?",
-                    f"{source.name} is outside the workspace. Copy it into workspace/.agent-attachments?",
+                    tr(self.language, "copy_title"),
+                    tr(self.language, "copy_message", name=source.name),
                 )
                 if answer != QMessageBox.Yes:
                     continue
@@ -280,7 +380,11 @@ class MainWindow(QMainWindow):
         if self.worker:
             return
         if not self.current_session:
-            QMessageBox.information(self, "Choose a workspace", "Create a conversation first.")
+            QMessageBox.information(
+                self,
+                tr(self.language, "choose_workspace"),
+                tr(self.language, "create_first"),
+            )
             return
         message = self.editor.toPlainText().strip()
         if not message:
@@ -305,7 +409,7 @@ class MainWindow(QMainWindow):
 
     def stop_run(self) -> None:
         if self.worker:
-            self.stop_button.setText("Stopping…")
+            self.stop_button.setText(tr(self.language, "stopping"))
             self.stop_button.setEnabled(False)
             self.worker.request_stop()
 
@@ -323,15 +427,15 @@ class MainWindow(QMainWindow):
         elif event.kind == "final":
             self.conversation.finish_assistant(event.message)
         elif event.kind in {"verification", "stopped"}:
-            self.conversation.add_status(event.message, event.ok)
+            self.conversation.add_event_status(event.kind, event.message, event.ok)
 
     def _run_completed(self, result: AgentResult) -> None:
         if result.status != "completed" and result.status != "cancelled":
-            self.conversation.add_status(result.final_answer, False)
+            self.conversation.add_event_status("stopped", result.final_answer, False)
 
     def _run_failed(self, message: str) -> None:
         self.conversation.add_status(message, False)
-        QMessageBox.critical(self, "Agent failed", message)
+        QMessageBox.critical(self, tr(self.language, "agent_failed"), message)
 
     def _worker_finished(self) -> None:
         session_id = self.current_session.id if self.current_session else None
@@ -342,6 +446,28 @@ class MainWindow(QMainWindow):
         self._set_running(False)
         if session_id:
             self.refresh_sessions(session_id)
+
+    def open_settings(self) -> None:
+        if self.worker:
+            return
+        dialog = SettingsDialog(self.settings, self.language, self)
+        if dialog.exec() != QDialog.Accepted:
+            return
+        updated = dialog.values()
+        language_changed = updated.language != self.language
+        self.settings_store.save(updated)
+        self.settings = updated
+        self.runtime = SessionRuntime(
+            self.store,
+            language=self.language,
+            max_steps=updated.max_steps,
+        )
+        if language_changed:
+            QMessageBox.information(
+                self,
+                tr(self.language, "restart_title"),
+                tr(self.language, "restart_message"),
+            )
 
     def _settings_changed(self) -> None:
         if not self.current_session or self.worker:
@@ -356,18 +482,18 @@ class MainWindow(QMainWindow):
 
     def _show_empty_state(self) -> None:
         self.current_session = None
-        self.title_label.setText("Start a conversation")
-        self.workspace_label.setText("Choose a workspace to begin")
-        self.workspace_button.setText("Workspace: not selected")
+        self.title_label.setText(tr(self.language, "start_conversation"))
+        self.workspace_label.setText(tr(self.language, "choose_workspace_to_begin"))
+        self.workspace_button.setText(tr(self.language, "workspace_unselected"))
         self.conversation.clear_transcript()
-        self.conversation.add_status("Create a conversation and select a project workspace.")
+        self.conversation.add_status(tr(self.language, "empty_status"))
         self._set_controls_enabled(True)
 
     def _set_running(self, running: bool) -> None:
         self._set_controls_enabled(not running)
         self.stop_button.setVisible(running)
         self.stop_button.setEnabled(running)
-        self.stop_button.setText("Stop")
+        self.stop_button.setText(tr(self.language, "stop"))
         self.send_button.setVisible(not running)
 
     def _set_controls_enabled(self, enabled: bool) -> None:
@@ -380,14 +506,24 @@ class MainWindow(QMainWindow):
             self.effort_combo,
             self.send_button,
             self.delete_button,
+            self.settings_button,
             self.session_list,
             self.new_button,
         ):
-            widget.setEnabled(has_session if widget not in {self.new_button, self.session_list} else enabled)
+            widget.setEnabled(
+                has_session
+                if widget not in {self.new_button, self.session_list, self.settings_button}
+                else enabled
+            )
 
     def _update_attachments(self) -> None:
         self.attachment_label.setText(
-            f"{len(self.attachments)} file(s): " + ", ".join(Path(p).name for p in self.attachments)
+            tr(
+                self.language,
+                "file_count",
+                count=len(self.attachments),
+                names=", ".join(Path(p).name for p in self.attachments),
+            )
             if self.attachments
             else ""
         )
@@ -407,8 +543,8 @@ class MainWindow(QMainWindow):
             self.stop_run()
             QMessageBox.information(
                 self,
-                "Agent is stopping",
-                "The current action will stop at the next safe boundary. Close the window after it finishes.",
+                tr(self.language, "stop_title"),
+                tr(self.language, "stop_message"),
             )
             event.ignore()
             return
