@@ -1,7 +1,7 @@
 项目名称：NJU Coding Agent
 Git 仓库：https://github.com/LuciferTGQ/coding-agent.git
 
-本项目是基于 DeepSeek Chat Completions 与原生 Tool Calling 自实现 Harness 的本地编程智能体，不依赖 Agent 框架或服务端文件、执行工具。支持持久化 PySide6 桌面端和 CLI。安装 Python 3.11+ 后执行 python -m pip install -e ".[dev]"，设置环境变量 DEEPSEEK_API_KEY。桌面端运行 python -m coding_agent.gui；CLI 运行 python -m coding_agent --workspace 项目目录 "Fix the failing tests and verify the result."
+本项目是基于 DeepSeek Chat Completions 与原生 Tool Calling 自实现 Harness 的本地编程智能体，不依赖 Agent 框架或服务端文件、执行工具。支持持久化 PySide6 桌面端和 CLI。安装 Python 3.11+ 后执行 python -m pip install -e ".[dev]"，设置环境变量 DEEPSEEK_API_KEY。桌面端运行 python -m coding_agent.gui，也可直接运行 start_gui.py；CLI 运行 python -m coding_agent --workspace 项目目录 "Fix the failing tests and verify the result."
 
 Agent 可自主浏览、搜索、分段读取、精确修改和运行测试，并把执行结果反馈给模型。ToolRegistry 统一声明、校验和执行六个本地工具；无效 JSON、路径越界、编辑歧义与命令失败都会成为可观察反馈。ContextManager 支持多轮对话，按完整用户轮次和 assistant-tool block 裁剪，并保留 thinking/tool calling 所需的 provider fields。
 

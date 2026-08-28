@@ -76,6 +76,8 @@ python -m coding_agent.gui
 coding-agent-gui
 ```
 
+也可以直接运行仓库根目录的 `start_gui.py` 启动桌面界面，例如 `python start_gui.py`。
+
 点击 **New conversation** 选择项目目录，然后输入任务。左侧会话列表可恢复历史；每个会话固定绑定一个 Workspace。已有对话切换 Workspace 时，应用会提示并创建新会话，防止不同项目的上下文混合。
 
 模型输出会逐步显示。Reasoning 默认折叠，read/search/edit/run 等调用显示为工具卡片，参数、diff 和命令输出可按需展开。点击 **Stop** 后，Agent 会在下一步骤边界或完整 tool-call 组执行完毕后停止，不会强制终止正在写文件的 handler。
