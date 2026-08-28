@@ -143,7 +143,10 @@ class ConversationView(QScrollArea):
         while self.layout.count():
             item = self.layout.takeAt(0)
             if item.widget():
-                item.widget().deleteLater()
+                widget = item.widget()
+                widget.hide()
+                widget.setParent(None)
+                widget.deleteLater()
         self._reasoning = None
         self._assistant = None
         self._tools = {}

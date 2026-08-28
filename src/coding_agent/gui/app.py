@@ -44,9 +44,9 @@ from coding_agent.gui.settings import (
     SettingsStore,
 )
 from coding_agent.gui.widgets import ConversationView
-from coding_agent.gui.worker import AgentWorker
+from coding_agent.gui.task_manager import AgentTaskManager
 from coding_agent.session_runtime import SessionRuntime
-from coding_agent.sessions import Session, SessionStore
+from coding_agent.sessions import Session, SessionPersistenceError, SessionStore
 
 
 def start_replacement_gui() -> bool:
@@ -114,14 +114,15 @@ class MainWindow(QMainWindow):
         self.settings_store = SettingsStore(self.store.root)
         self.settings = self.settings_store.load()
         self.language = self.settings.language
-        self.runtime = SessionRuntime(
-            self.store,
-            language=self.language,
-            max_steps=self.settings.max_steps,
-        )
+        self.task_manager = AgentTaskManager(self)
+        self.task_manager.event_received.connect(self._handle_session_event)
+        self.task_manager.completed.connect(self._task_completed)
+        self.task_manager.failed.connect(self._task_failed)
+        self.task_manager.finished.connect(self._task_finished)
         self.current_session: Session | None = None
-        self.worker: AgentWorker | None = None
-        self.running_session_id: str | None = None
+        self.failed_session_ids: set[str] = set()
+        self.drafts: dict[str, tuple[str, list[str]]] = {}
+        self._closing_after_tasks = False
         self._run_dots = 0
         self.run_timer = QTimer(self)
         self.run_timer.setInterval(450)
@@ -280,10 +281,14 @@ class MainWindow(QMainWindow):
             )
             running = (
                 "." * self._run_dots
-                if session.id == self.running_session_id and self._run_dots
+                if self.task_manager.is_running(session.id) and self._run_dots
                 else ""
             )
-            row.set_session(session, running_text=running)
+            row.set_session(
+                session,
+                running_text=running,
+                failed=session.id in self.failed_session_ids,
+            )
             item.setSizeHint(row.sizeHint())
             self.session_list.setItemWidget(item, row)
             if session.id == current_id:
@@ -311,8 +316,6 @@ class MainWindow(QMainWindow):
                 row.set_selected(item.isSelected())
 
     def new_session(self) -> None:
-        if self.worker:
-            return
         directory = QFileDialog.getExistingDirectory(
             self, tr(self.language, "choose_workspace"), str(Path.cwd())
         )
@@ -331,10 +334,10 @@ class MainWindow(QMainWindow):
         self.editor.setFocus()
 
     def delete_session(self, session_id: str | None = None) -> None:
-        if self.worker:
-            return
         target_id = session_id or (self.current_session.id if self.current_session else None)
         if not target_id:
+            return
+        if self.task_manager.is_running(target_id):
             return
         session = self.store.load(target_id)
         answer = QMessageBox.question(
@@ -349,8 +352,6 @@ class MainWindow(QMainWindow):
             self.refresh_sessions()
 
     def rename_session(self, session_id: str) -> None:
-        if self.worker:
-            return
         session = self.store.load(session_id)
         title, accepted = QInputDialog.getText(
             self,
@@ -407,10 +408,12 @@ class MainWindow(QMainWindow):
             )
 
     def _show_session_menu(self, session_id: str, position) -> None:
-        if self.worker:
-            return
         session = self.store.load(session_id)
         menu = QMenu(self)
+        stop_action = None
+        if self.task_manager.is_running(session_id):
+            stop_action = menu.addAction(tr(self.language, "stop_task"))
+            menu.addSeparator()
         rename_action = menu.addAction(tr(self.language, "rename"))
         pin_action = menu.addAction(tr(self.language, "unpin" if session.pinned else "pin"))
         unread_action = menu.addAction(
@@ -419,8 +422,11 @@ class MainWindow(QMainWindow):
         open_action = menu.addAction(tr(self.language, "open_workspace"))
         menu.addSeparator()
         delete_action = menu.addAction(tr(self.language, "delete_conversation"))
+        delete_action.setEnabled(not self.task_manager.is_running(session_id))
         chosen = menu.exec(position)
-        if chosen == rename_action:
+        if stop_action is not None and chosen == stop_action:
+            self.task_manager.stop(session_id)
+        elif chosen == rename_action:
             self.rename_session(session_id)
         elif chosen == pin_action:
             self.toggle_session_pinned(session_id)
@@ -432,6 +438,11 @@ class MainWindow(QMainWindow):
             self.delete_session(session_id)
 
     def load_session(self, session_id: str) -> None:
+        if self.current_session:
+            self.drafts[self.current_session.id] = (
+                self.editor.toPlainText(),
+                list(self.attachments),
+            )
         self.current_session = self.store.load(session_id)
         session = self.current_session
         metadata_changes: dict[str, object] = {}
@@ -439,6 +450,7 @@ class MainWindow(QMainWindow):
             metadata_changes["preferred_language"] = self.language
         if session.unread:
             metadata_changes["unread"] = False
+        self.failed_session_ids.discard(session.id)
         if metadata_changes:
             session = self.store.update_metadata(session.id, **metadata_changes)
             self.current_session = session
@@ -453,15 +465,17 @@ class MainWindow(QMainWindow):
         self.effort_combo.setCurrentText(session.reasoning_effort)
         self.model_combo.blockSignals(False)
         self.effort_combo.blockSignals(False)
-        self.attachments.clear()
+        draft_text, draft_attachments = self.drafts.get(session.id, ("", []))
+        self.editor.setPlainText(draft_text)
+        self.attachments = list(draft_attachments)
         self._update_attachments()
         self.conversation.render(session.transcript)
-        self._set_controls_enabled(True)
+        self._sync_controls()
         if metadata_changes:
             self.refresh_sessions(session.id, reload_selected=False)
 
     def change_workspace(self) -> None:
-        if self.worker:
+        if self.current_session and self.task_manager.is_running(self.current_session.id):
             return
         initial = self.current_session.workspace if self.current_session else str(Path.cwd())
         directory = QFileDialog.getExistingDirectory(
@@ -524,8 +538,32 @@ class MainWindow(QMainWindow):
         prompt.exec()
         return prompt.clickedButton() == allow and prompt.clickedButton() != cancel
 
+    def _confirm_same_workspace_concurrency(self) -> bool:
+        prompt = QMessageBox(self)
+        prompt.setIcon(QMessageBox.Warning)
+        prompt.setWindowTitle(tr(self.language, "same_workspace_title"))
+        prompt.setText(tr(self.language, "same_workspace_message"))
+        cancel = prompt.addButton(tr(self.language, "cancel"), QMessageBox.RejectRole)
+        proceed = prompt.addButton(
+            tr(self.language, "continue_running"), QMessageBox.AcceptRole
+        )
+        prompt.exec()
+        return prompt.clickedButton() == proceed and prompt.clickedButton() != cancel
+
+    def _confirm_stop_all(self, count: int) -> bool:
+        prompt = QMessageBox(self)
+        prompt.setIcon(QMessageBox.Warning)
+        prompt.setWindowTitle(tr(self.language, "tasks_running_title"))
+        prompt.setText(
+            tr(self.language, "tasks_running_message", count=count)
+        )
+        cancel = prompt.addButton(tr(self.language, "cancel"), QMessageBox.RejectRole)
+        stop_all = prompt.addButton(tr(self.language, "stop_all"), QMessageBox.AcceptRole)
+        prompt.exec()
+        return prompt.clickedButton() == stop_all and prompt.clickedButton() != cancel
+
     def attach_files(self) -> None:
-        if not self.current_session or self.worker:
+        if not self.current_session:
             QMessageBox.information(
                 self,
                 tr(self.language, "choose_workspace"),
@@ -570,8 +608,6 @@ class MainWindow(QMainWindow):
         self._update_attachments()
 
     def send_message(self) -> None:
-        if self.worker:
-            return
         if not self.current_session:
             QMessageBox.information(
                 self,
@@ -579,34 +615,49 @@ class MainWindow(QMainWindow):
                 tr(self.language, "create_first"),
             )
             return
+        session_id = self.current_session.id
+        if self.task_manager.is_running(session_id):
+            return
         message = self.editor.toPlainText().strip()
         if not message:
+            return
+        conflicts = self._same_workspace_running_sessions(self.current_session)
+        if conflicts and not self._confirm_same_workspace_concurrency():
             return
         attachments = list(self.attachments)
         self.conversation.add_user(message, attachments)
         self.editor.clear()
         self.attachments.clear()
+        self.drafts[session_id] = ("", [])
         self._update_attachments()
-        self.worker = AgentWorker(
-            runtime=self.runtime,
-            session_id=self.current_session.id,
+        self.failed_session_ids.discard(session_id)
+        runtime = SessionRuntime(
+            self.store,
+            language=self.language,
+            max_steps=self.settings.max_steps,
+        )
+        self.task_manager.start(
+            runtime=runtime,
+            session_id=session_id,
             message=message,
             attachments=attachments,
         )
-        self.worker.event_received.connect(self._handle_event)
-        self.worker.completed.connect(self._run_completed)
-        self.worker.failed.connect(self._run_failed)
-        self.worker.finished.connect(self._worker_finished)
-        self._set_running(True)
-        self.worker.start()
+        if not self.run_timer.isActive():
+            self._run_dots = 1
+            self.run_timer.start()
+        self._update_session_row(session_id)
+        self._sync_controls()
 
     def stop_run(self) -> None:
-        if self.worker:
+        if self.current_session and self.task_manager.stop(self.current_session.id):
             self.stop_button.setText(tr(self.language, "stopping"))
             self.stop_button.setEnabled(False)
-            self.worker.request_stop()
 
-    def _handle_event(self, event: AgentEvent) -> None:
+    def _handle_session_event(self, session_id: str, event: AgentEvent) -> None:
+        if not self.current_session or self.current_session.id != session_id:
+            if event.kind == "persistence_warning":
+                self._mark_background_unread(session_id, failed=False)
+            return
         if event.kind == "reasoning_delta":
             self.conversation.append_reasoning(event.message)
         elif event.kind in {"content_delta", "model"}:
@@ -627,28 +678,59 @@ class MainWindow(QMainWindow):
         }:
             self.conversation.add_event_status(event.kind, event.message, event.ok)
 
-    def _run_completed(self, result: AgentResult) -> None:
-        if result.status != "completed" and result.status != "cancelled":
-            self.conversation.add_event_status("stopped", result.final_answer, False)
+    def _task_completed(self, session_id: str, result: AgentResult) -> None:
+        if not self.current_session or self.current_session.id != session_id:
+            self._mark_background_unread(session_id, failed=False)
 
-    def _run_failed(self, category: str, message: str) -> None:
-        self.conversation.add_status(message, False)
-        title_key = "session_persistence_failed" if category == "persistence" else "agent_failed"
-        QMessageBox.critical(self, tr(self.language, title_key), message)
+    def _task_failed(self, session_id: str, category: str, message: str) -> None:
+        is_current = self.current_session is not None and self.current_session.id == session_id
+        if is_current:
+            self.conversation.add_status(message, False)
+            title_key = (
+                "session_persistence_failed"
+                if category == "persistence"
+                else "agent_failed"
+            )
+            QMessageBox.critical(self, tr(self.language, title_key), message)
+        else:
+            self._mark_background_unread(session_id, failed=True)
 
-    def _worker_finished(self) -> None:
-        session_id = self.current_session.id if self.current_session else None
-        worker = self.worker
-        self.worker = None
-        if worker:
-            worker.deleteLater()
-        self._set_running(False)
-        if session_id:
-            self.refresh_sessions(session_id)
+    def _task_finished(self, session_id: str) -> None:
+        if not self.task_manager.running_count():
+            self.run_timer.stop()
+            self._run_dots = 0
+        self.refresh_sessions(
+            self.current_session.id if self.current_session else None,
+            reload_selected=False,
+        )
+        self._sync_controls()
+        if self._closing_after_tasks and not self.task_manager.running_count():
+            QTimer.singleShot(0, self.close)
+
+    def _mark_background_unread(self, session_id: str, *, failed: bool) -> None:
+        try:
+            self.store.update_metadata(session_id, unread=True)
+        except (KeyError, SessionPersistenceError):
+            pass
+        if failed:
+            self.failed_session_ids.add(session_id)
+        self._update_session_row(session_id)
+
+    def _same_workspace_running_sessions(self, session: Session) -> list[str]:
+        workspace = str(Path(session.workspace).resolve()).casefold()
+        conflicts: list[str] = []
+        for session_id in self.task_manager.running_session_ids():
+            if session_id == session.id:
+                continue
+            try:
+                other = self.store.load(session_id)
+            except (KeyError, SessionPersistenceError, ValueError):
+                continue
+            if str(Path(other.workspace).resolve()).casefold() == workspace:
+                conflicts.append(session_id)
+        return conflicts
 
     def open_settings(self) -> None:
-        if self.worker:
-            return
         dialog = SettingsDialog(self.settings, self.language, self)
         if dialog.exec() != QDialog.Accepted:
             return
@@ -658,13 +740,20 @@ class MainWindow(QMainWindow):
         language_changed = updated.language != self.language
         self.settings_store.save(updated)
         self.settings = updated
-        self.runtime = SessionRuntime(
-            self.store,
-            language=self.language,
-            max_steps=updated.max_steps,
-        )
-        if language_changed and self._confirm_restart():
-            self._restart_application()
+        if language_changed:
+            running_count = self.task_manager.running_count()
+            if running_count:
+                QMessageBox.information(
+                    self,
+                    tr(self.language, "restart_tasks_running_title"),
+                    tr(
+                        self.language,
+                        "restart_tasks_running_message",
+                        count=running_count,
+                    ),
+                )
+            elif self._confirm_restart():
+                self._restart_application()
 
     def _confirm_restart(self) -> bool:
         prompt = QMessageBox(self)
@@ -688,7 +777,10 @@ class MainWindow(QMainWindow):
         return True
 
     def _settings_changed(self) -> None:
-        if not self.current_session or self.worker:
+        if (
+            not self.current_session
+            or self.task_manager.is_running(self.current_session.id)
+        ):
             return
         self.current_session = self.store.update_metadata(
             self.current_session.id,
@@ -697,68 +789,60 @@ class MainWindow(QMainWindow):
         )
 
     def _session_selected(self, current: QListWidgetItem | None) -> None:
-        if current and not self.worker:
+        if current:
             self.load_session(current.data(Qt.UserRole))
 
     def _show_empty_state(self) -> None:
+        if self.current_session:
+            self.drafts[self.current_session.id] = (
+                self.editor.toPlainText(),
+                list(self.attachments),
+            )
         self.current_session = None
         self.title_label.setText(tr(self.language, "start_conversation"))
         self.workspace_label.setText(tr(self.language, "choose_workspace_to_begin"))
         self.workspace_button.setText(tr(self.language, "workspace_unselected"))
         self.conversation.clear_transcript()
         self.conversation.add_status(tr(self.language, "empty_status"))
-        self._set_controls_enabled(True)
+        self.editor.clear()
+        self.attachments.clear()
+        self._update_attachments()
+        self._sync_controls()
 
-    def _set_running(self, running: bool) -> None:
-        if running and self.current_session:
-            self.running_session_id = self.current_session.id
-            self._run_dots = 1
-            self.run_timer.start()
-            self._update_session_row(self.running_session_id)
-        elif not running:
-            previous = self.running_session_id
-            self.run_timer.stop()
-            self.running_session_id = None
-            self._run_dots = 0
-            if previous:
-                self._update_session_row(previous)
-        self._set_controls_enabled(not running)
+    def _sync_controls(self) -> None:
+        has_session = self.current_session is not None
+        running = bool(
+            self.current_session
+            and self.task_manager.is_running(self.current_session.id)
+        )
+        self.editor.setEnabled(has_session)
+        self.workspace_button.setEnabled(has_session and not running)
+        self.attach_button.setEnabled(has_session and not running)
+        self.model_combo.setEnabled(has_session and not running)
+        self.effort_combo.setEnabled(has_session and not running)
+        self.send_button.setEnabled(has_session and not running)
+        self.new_button.setEnabled(True)
+        self.session_list.setEnabled(True)
+        self.search_input.setEnabled(True)
+        self.settings_button.setEnabled(True)
         self.stop_button.setVisible(running)
         self.stop_button.setEnabled(running)
         self.stop_button.setText(tr(self.language, "stop"))
         self.send_button.setVisible(not running)
 
-    def _set_controls_enabled(self, enabled: bool) -> None:
-        has_session = enabled and self.current_session is not None
-        for widget in (
-            self.editor,
-            self.workspace_button,
-            self.attach_button,
-            self.model_combo,
-            self.effort_combo,
-            self.send_button,
-            self.settings_button,
-            self.search_input,
-            self.session_list,
-            self.new_button,
-        ):
-            widget.setEnabled(
-                has_session
-                if widget not in {self.new_button, self.session_list, self.settings_button}
-                else enabled
-            )
-
     def _advance_run_indicator(self) -> None:
-        if not self.running_session_id:
+        running_ids = self.task_manager.running_session_ids()
+        if not running_ids:
             self.run_timer.stop()
             return
         self._run_dots = self._run_dots % 3 + 1
-        self._update_session_row(self.running_session_id)
+        for session_id in running_ids:
+            self._update_session_row(session_id)
 
     def _update_session_row(self, session_id: str) -> None:
         try:
             session = self.store.load(session_id)
-        except KeyError:
+        except (KeyError, SessionPersistenceError, ValueError):
             return
         for index in range(self.session_list.count()):
             item = self.session_list.item(index)
@@ -768,10 +852,14 @@ class MainWindow(QMainWindow):
             if isinstance(row, SessionRow):
                 running = (
                     "." * self._run_dots
-                    if session_id == self.running_session_id and self._run_dots
+                    if self.task_manager.is_running(session_id) and self._run_dots
                     else ""
                 )
-                row.set_session(session, running_text=running)
+                row.set_session(
+                    session,
+                    running_text=running,
+                    failed=session_id in self.failed_session_ids,
+                )
             break
 
     def _update_attachments(self) -> None:
@@ -797,13 +885,11 @@ class MainWindow(QMainWindow):
         return candidate
 
     def closeEvent(self, event: QCloseEvent) -> None:
-        if self.worker:
-            self.stop_run()
-            QMessageBox.information(
-                self,
-                tr(self.language, "stop_title"),
-                tr(self.language, "stop_message"),
-            )
+        running_count = self.task_manager.running_count()
+        if running_count:
+            if not self._closing_after_tasks and self._confirm_stop_all(running_count):
+                self._closing_after_tasks = True
+                self.task_manager.stop_all()
             event.ignore()
             return
         event.accept()

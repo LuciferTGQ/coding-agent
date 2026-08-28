@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+from threading import Event
+import time
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
@@ -9,7 +11,7 @@ from PySide6.QtCore import Qt
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QFileDialog
 
-from coding_agent.agent import AgentEvent
+from coding_agent.agent import AgentEvent, AgentResult
 import coding_agent.gui.app as gui_app
 from coding_agent.gui.app import MainWindow
 from coding_agent.gui.settings import AppSettings, SettingsStore
@@ -43,13 +45,17 @@ def test_window_loads_persistent_session_and_renders_event_cards(tmp_path: Path)
         "max",
     ]
 
-    window._handle_event(AgentEvent("reasoning_delta", 1, "checking"))
-    window._handle_event(
+    window._handle_session_event(session.id, AgentEvent("reasoning_delta", 1, "checking"))
+    window._handle_session_event(
+        session.id,
         AgentEvent("tool_call", 1, '{"path":"x.py"}', "read_file", None, "c1")
     )
-    window._handle_event(AgentEvent("tool_result", 1, "contents", "read_file", True, "c1"))
-    window._handle_event(AgentEvent("content_delta", 2, "Done"))
-    window._handle_event(AgentEvent("final", 2, "Done"))
+    window._handle_session_event(
+        session.id,
+        AgentEvent("tool_result", 1, "contents", "read_file", True, "c1"),
+    )
+    window._handle_session_event(session.id, AgentEvent("content_delta", 2, "Done"))
+    window._handle_session_event(session.id, AgentEvent("final", 2, "Done"))
 
     assert "c1" in window.conversation._tools
     assert "已完成" in window.conversation._tools["c1"].toggle.text()
@@ -80,8 +86,8 @@ def test_saved_english_setting_applies_to_next_window(tmp_path: Path) -> None:
 
     assert window.new_button.text() == "＋  New conversation"
     assert window.settings_button.text() == "Settings"
-    assert window.runtime.language == "en"
-    assert window.runtime.max_steps == 17
+    assert window.language == "en"
+    assert window.settings.max_steps == 17
     window.close()
     app.processEvents()
 
@@ -241,6 +247,286 @@ def test_long_user_and_markdown_messages_expand_without_inner_scroll(tmp_path: P
         expected = bubble.body.heightForWidth(bubble.body.width())
         assert bubble.body.height() >= expected
         assert bubble.body.geometry().bottom() <= bubble.contentsRect().bottom()
+    window.close()
+    app.processEvents()
+
+
+def test_background_events_do_not_render_in_current_conversation(tmp_path: Path) -> None:
+    app = _app()
+    workspace_a = tmp_path / "workspace-a"
+    workspace_b = tmp_path / "workspace-b"
+    workspace_a.mkdir()
+    workspace_b.mkdir()
+    store = SessionStore(tmp_path / "routing-state")
+    session_a = store.create(workspace=workspace_a, title="A")
+    session_b = store.create(workspace=workspace_b, title="B")
+    window = MainWindow(store)
+    window.load_session(session_b.id)
+
+    window._handle_session_event(
+        session_a.id,
+        AgentEvent("tool_call", 1, "background", "read_file", None, "a-call"),
+    )
+    assert "a-call" not in window.conversation._tools
+
+    window._handle_session_event(
+        session_b.id,
+        AgentEvent("tool_call", 1, "foreground", "read_file", None, "b-call"),
+    )
+    assert "b-call" in window.conversation._tools
+    window.close()
+    app.processEvents()
+
+
+def test_switching_sessions_hides_detached_transcript_widgets(tmp_path: Path) -> None:
+    app = _app()
+    workspace_a = tmp_path / "workspace-a"
+    workspace_b = tmp_path / "workspace-b"
+    workspace_a.mkdir()
+    workspace_b.mkdir()
+    store = SessionStore(tmp_path / "switch-visual-state")
+    session_a = store.create(workspace=workspace_a, title="A")
+    session_b = store.create(workspace=workspace_b, title="B")
+    session_a.transcript = [{"type": "user", "text": "only A"}]
+    store.save(session_a)
+    window = MainWindow(store)
+    window.show()
+    window.load_session(session_a.id)
+    old_bubble = window.conversation.layout.itemAt(0).widget()
+
+    window.load_session(session_b.id)
+    app.processEvents()
+
+    assert old_bubble.isHidden()
+    assert old_bubble.parent() is None
+    window.close()
+    app.processEvents()
+
+
+def test_background_completion_and_failure_update_sidebar_state(tmp_path: Path) -> None:
+    app = _app()
+    workspace_a = tmp_path / "workspace-a"
+    workspace_b = tmp_path / "workspace-b"
+    workspace_a.mkdir()
+    workspace_b.mkdir()
+    store = SessionStore(tmp_path / "background-state")
+    session_a = store.create(workspace=workspace_a, title="A")
+    session_b = store.create(workspace=workspace_b, title="B")
+    window = MainWindow(store)
+    window.load_session(session_b.id)
+    result = AgentResult("done", 1, "completed", False, False)
+
+    window._task_completed(session_a.id, result)
+    assert store.load(session_a.id).unread is True
+
+    window._task_failed(session_a.id, "agent", "failed")
+    assert session_a.id in window.failed_session_ids
+    assert store.load(session_a.id).unread is True
+    window.close()
+    app.processEvents()
+
+
+def test_running_session_does_not_disable_navigation_or_draft_editor(tmp_path: Path) -> None:
+    class RunningWorker:
+        def request_stop(self) -> None:
+            pass
+
+    app = _app()
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    store = SessionStore(tmp_path / "running-state")
+    session = store.create(workspace=workspace)
+    window = MainWindow(store)
+    window.task_manager.workers[session.id] = RunningWorker()
+    window._sync_controls()
+
+    assert window.editor.isEnabled()
+    assert window.new_button.isEnabled()
+    assert window.session_list.isEnabled()
+    assert not window.send_button.isEnabled()
+    assert not window.stop_button.isHidden()
+    window.task_manager.workers.clear()
+    window.close()
+    app.processEvents()
+
+
+def test_same_workspace_running_session_is_detected(tmp_path: Path) -> None:
+    app = _app()
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    store = SessionStore(tmp_path / "conflict-state")
+    session_a = store.create(workspace=workspace, title="A")
+    session_b = store.create(workspace=workspace, title="B")
+    window = MainWindow(store)
+    window.task_manager.workers[session_a.id] = object()
+
+    assert window._same_workspace_running_sessions(session_b) == [session_a.id]
+    window.task_manager.workers.clear()
+    window.close()
+    app.processEvents()
+
+
+def test_same_workspace_warning_cancel_preserves_draft_and_does_not_start(
+    tmp_path: Path, monkeypatch
+) -> None:
+    app = _app()
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    store = SessionStore(tmp_path / "conflict-cancel-state")
+    session_a = store.create(workspace=workspace, title="A")
+    session_b = store.create(workspace=workspace, title="B")
+    window = MainWindow(store)
+    window.task_manager.workers[session_a.id] = object()
+    window.load_session(session_b.id)
+    window.editor.setPlainText("keep this draft")
+    window.attachments = ["notes.txt"]
+    window._update_attachments()
+    monkeypatch.setattr(window, "_confirm_same_workspace_concurrency", lambda: False)
+
+    window.send_message()
+
+    assert window.editor.toPlainText() == "keep this draft"
+    assert window.attachments == ["notes.txt"]
+    assert not window.task_manager.is_running(session_b.id)
+    assert store.load(session_b.id).transcript == []
+    window.task_manager.workers.clear()
+    window.close()
+    app.processEvents()
+
+
+def test_main_window_runs_two_sessions_and_marks_background_completion_unread(
+    tmp_path: Path, monkeypatch
+) -> None:
+    app = _app()
+    runtimes = []
+
+    class BlockingRuntime:
+        def __init__(self, *args, **kwargs) -> None:
+            self.language = kwargs.get("language")
+            self.max_steps = kwargs.get("max_steps")
+            self.started = Event()
+            self.release = Event()
+            self.session_id = ""
+            runtimes.append(self)
+
+        def run_turn(
+            self,
+            session_id,
+            message,
+            *,
+            attachments,
+            on_event,
+            should_cancel,
+            stream,
+        ) -> AgentResult:
+            self.session_id = session_id
+            self.started.set()
+            on_event(AgentEvent("model", 1, f"running {message}"))
+            while not self.release.wait(0.01):
+                if should_cancel():
+                    return AgentResult("stopped", 1, "cancelled", False, False)
+            on_event(AgentEvent("final", 1, f"finished {message}"))
+            return AgentResult("done", 1, "completed", False, False)
+
+    monkeypatch.setattr(gui_app, "SessionRuntime", BlockingRuntime)
+    workspace_a = tmp_path / "workspace-a"
+    workspace_b = tmp_path / "workspace-b"
+    workspace_a.mkdir()
+    workspace_b.mkdir()
+    store = SessionStore(tmp_path / "window-parallel-state")
+    session_a = store.create(workspace=workspace_a, title="A")
+    session_b = store.create(workspace=workspace_b, title="B")
+    window = MainWindow(store)
+
+    window.load_session(session_a.id)
+    window.editor.setPlainText("task A")
+    window.send_message()
+    window.load_session(session_b.id)
+    window.editor.setPlainText("task B")
+    window.send_message()
+    deadline = time.monotonic() + 2
+    active = [runtime for runtime in runtimes if runtime.session_id]
+    while len(active) < 2 and time.monotonic() < deadline:
+        app.processEvents()
+        time.sleep(0.01)
+        active = [runtime for runtime in runtimes if runtime.session_id]
+    assert len(active) == 2
+    assert all(runtime.started.wait(1) for runtime in active)
+    assert all(runtime.language == "zh" for runtime in active)
+    assert window.task_manager.running_count() == 2
+
+    runtime_a = next(runtime for runtime in active if runtime.session_id == session_a.id)
+    runtime_a.release.set()
+    deadline = time.monotonic() + 2
+    while window.task_manager.is_running(session_a.id) and time.monotonic() < deadline:
+        app.processEvents()
+        time.sleep(0.01)
+    assert not window.task_manager.is_running(session_a.id)
+    assert window.task_manager.is_running(session_b.id)
+    assert store.load(session_a.id).unread is True
+
+    window.stop_run()
+    deadline = time.monotonic() + 2
+    while window.task_manager.running_count() and time.monotonic() < deadline:
+        app.processEvents()
+        time.sleep(0.01)
+    assert window.task_manager.running_count() == 0
+    window.close()
+    app.processEvents()
+
+
+def test_close_requests_cooperative_stop_all(tmp_path: Path, monkeypatch) -> None:
+    class RunningWorker:
+        def __init__(self) -> None:
+            self.stopped = False
+
+        def request_stop(self) -> None:
+            self.stopped = True
+
+    app = _app()
+    store = SessionStore(tmp_path / "close-state")
+    window = MainWindow(store)
+    window.show()
+    workers = [RunningWorker(), RunningWorker()]
+    window.task_manager.workers.update({"a": workers[0], "b": workers[1]})
+    monkeypatch.setattr(window, "_confirm_stop_all", lambda count: count == 2)
+
+    window.close()
+    app.processEvents()
+
+    assert window.isVisible()
+    assert window._closing_after_tasks is True
+    assert all(worker.stopped for worker in workers)
+    window.task_manager.workers.clear()
+    window.close()
+    app.processEvents()
+    assert not window.isVisible()
+
+
+def test_language_restart_is_deferred_while_tasks_run(
+    tmp_path: Path, monkeypatch
+) -> None:
+    app = _app()
+    store = SessionStore(tmp_path / "deferred-restart-state")
+    window = MainWindow(store)
+    window.task_manager.workers["running"] = object()
+    notices = []
+    monkeypatch.setattr(
+        gui_app.QMessageBox,
+        "information",
+        lambda *args: notices.append(args) or gui_app.QMessageBox.Ok,
+    )
+    monkeypatch.setattr(
+        window,
+        "_confirm_restart",
+        lambda: (_ for _ in ()).throw(AssertionError("restart prompt must be deferred")),
+    )
+
+    window._apply_settings(AppSettings(language="en"))
+
+    assert SettingsStore(store.root).load().language == "en"
+    assert notices
+    window.task_manager.workers.clear()
     window.close()
     app.processEvents()
 

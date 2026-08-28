@@ -370,3 +370,35 @@ def test_switching_session_language_keeps_workspace_and_conversation(tmp_path: P
     assert len(loaded.model_context["turns"]) == 2
     assert "preferred user-facing language is English" in model.requests[1][0]["content"]
     assert model.requests[1][1]["content"] == "Please inspect this project."
+
+
+def test_parallel_session_runtimes_keep_contexts_isolated(tmp_path: Path) -> None:
+    workspace_a = tmp_path / "workspace-a"
+    workspace_b = tmp_path / "workspace-b"
+    workspace_a.mkdir()
+    workspace_b.mkdir()
+    store = SessionStore(tmp_path / "parallel-state")
+    session_a = store.create(workspace=workspace_a, title="A")
+    session_b = store.create(workspace=workspace_b, title="B")
+    model_a = FakeModel(["Answer A"])
+    model_b = FakeModel(["Answer B"])
+
+    def run(session_id: str, message: str, model: FakeModel) -> None:
+        SessionRuntime(store, model_factory=lambda _: model).run_turn(
+            session_id, message, stream=False
+        )
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        first = pool.submit(run, session_a.id, "Only A", model_a)
+        second = pool.submit(run, session_b.id, "Only B", model_b)
+        first.result()
+        second.result()
+
+    loaded_a = store.load(session_a.id)
+    loaded_b = store.load(session_b.id)
+    assert loaded_a.transcript[0]["text"] == "Only A"
+    assert loaded_b.transcript[0]["text"] == "Only B"
+    assert model_a.requests[0][1]["content"] == "Only A"
+    assert model_b.requests[0][1]["content"] == "Only B"
+    assert "Only B" not in str(loaded_a.model_context)
+    assert "Only A" not in str(loaded_b.model_context)

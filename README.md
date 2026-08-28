@@ -8,6 +8,7 @@ NJU Coding Agent 是一个轻量、自实现 Harness 的本地 Coding Agent。�
 
 - 在单 Agent 循环中完成“观察、行动、获取反馈、继续调整”的多步编程任务。
 - 以多轮会话持续处理同一 Workspace，关闭应用后可恢复完整对话和模型上下文。
+- 桌面端可让多个独立 Session 同时运行；事件、Stop、上下文和状态按 Session 隔离。
 - 流式展示回答、可折叠 reasoning 和带状态的工具卡片；模型与工具运行在后台线程。
 - 通过六个受限工具浏览、搜索、读取、写入、精确编辑文件并执行命令。
 - 将 stdout、stderr、退出码和超时信息回传给模型，让失败成为下一步决策的输入。
@@ -18,11 +19,11 @@ NJU Coding Agent 是一个轻量、自实现 Harness 的本地 Coding Agent。�
 ## 数据流
 
 ```text
-Desktop GUI / CLI
-       ↓
-SessionRuntime ── SessionStore (~/.nju-coding-agent)
-       ↓                 ↑ full transcript + model context
-AgentRunner ←→ ContextManager
+Desktop GUI ── AgentTaskManager ── session A/B/... workers
+                              ↓
+CLI ───────────────────→ SessionRuntime ── SessionStore (~/.nju-coding-agent)
+                              ↓                 ↑ full transcript + model context
+                         AgentRunner ←→ ContextManager
        ↓                ↑
 DeepSeek Chat Client (streaming or non-streaming)
        ↓ tool_calls     ↑ assistant + tool results
@@ -81,6 +82,8 @@ coding-agent-gui
 应用默认使用中文。点击 **新建对话** 选择项目目录，确认文件与命令执行授权后输入任务。左侧可按标题或 Workspace 搜索历史会话；每条会话的 `...` 菜单和右键菜单提供重命名、置顶、未读标记、打开工作区和删除操作。每个会话固定绑定一个 Workspace；已有对话切换 Workspace 时，应用会提示并创建新会话，防止不同项目的上下文混合。
 
 模型输出会逐步显示。思考过程默认折叠，read/search/edit/run 等调用显示为工具卡片，参数、diff 和命令输出可按需展开。点击 **停止** 后，Agent 会在下一步骤边界或完整 tool-call 组执行完毕后停止，不会强制终止正在写文件的 handler。
+
+不同 Session 可以独立并行运行。切换会话不会把后台事件写入当前对话；后台完成显示未读圆点，后台失败显示 `!`，菜单可单独停止后台任务。同一 Workspace 的多个 Session 也可并发，但启动第二个任务前会明确警告：当前版本不提供修改隔离、文件锁、自动合并或一致性保证。
 
 轻量设置弹窗提供界面语言、默认模型、默认思考强度和默认最大步骤。语言可选择中文或 English；保存语言变更后可以稍后应用，也可以安全启动新进程并立即重启。中文界面会要求模型除代码、命令、路径和必要技术标识外，默认使用中文交流。Tool 名称、JSON Schema 和 DeepSeek 协议字段不会被翻译。
 
@@ -169,7 +172,8 @@ python scripts/live_smoke.py
 
 - 目前只实现 DeepSeek Chat Completions provider，桌面模型列表只提供已按该协议验证的 `deepseek-v4-flash`。
 - Context soft budget 使用字符数近似 token 数，不做模型摘要。
-- 当前没有 Repo Map、RAG、LSP 或多 Agent 编排。
+- 当前没有 Repo Map、RAG、LSP 或协作式多 Agent 编排；并行能力是多个彼此独立的单 Agent Session。
 - Stop 是协作式边界停止，不会中断正在进行的网络请求或单个工具 handler。
+- 同一 Workspace 并发不保证修改隔离和一致性。Git Worktree 可作为未来的每任务独立副本方案，但当前版本不会自动创建。
 - Exact replacement 适合小而精确的变更，不适合大规模结构化重构。
 - 本地 command filtering 不能替代容器、VM 或其他 OS 级隔离。

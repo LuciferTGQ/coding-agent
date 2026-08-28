@@ -129,7 +129,11 @@ GUI 文案由一个集中维护的 `zh/en` 映射提供，不使用额外 locale
 
 每个 Session 固定绑定一个 Workspace。已有历史时切换目录会创建新 Session，从结构上避免项目 A 的工具结果进入项目 B 的模型上下文。附件不会绕过这条边界：内部文件只记录相对路径；外部文件必须经确认复制进 Workspace，随后仍通过 `Workspace.resolve_path()` 和文件工具读取。
 
-Qt 主线程只处理窗口和控件。`AgentWorker` 在 `QThread` 中运行 `SessionRuntime`，用 queued signals 把增量事件送回 UI。Stop 设置协作式 cancellation flag；AgentRunner 只在模型步骤边界或完整 tool-call 组之前检查，避免强制杀死正在进行的文件写入或留下缺少对应 tool result 的 provider message。
+Qt 主线程只处理窗口和控件。`AgentTaskManager` 维护 `workers[session_id]`；每个 `AgentWorker` 在自己的 `QThread` 中运行一套既有 `SessionRuntime → AgentRunner → ToolRegistry → Workspace`。Manager 只把 queued signals 包装为 `(session_id, event/result/error)`，不参与 prompt、reasoning、Tool Calling 或 Context 裁剪。前台 Session 实时渲染自己的 event，后台 event 只更新对应 Sidebar 状态；切回时从该 Session 的持久 transcript 恢复。
+
+同一个 Session 同时最多有一个 Worker，不实现消息队列。不同 Session 可以并发，Stop 按 session_id 设置各自的协作式 cancellation flag；关闭应用时 `stop_all()` 请求所有 Worker 在安全边界停止，绝不调用 `QThread.terminate()`。多个运行任务存在时，语言设置可以保存，但立即重启被推迟。
+
+不同 Session 的 Workspace 可以相同。应用会在第二个任务启动前警告文件覆盖、stale state、测试与命令互相干扰风险，但用户确认后仍允许继续；当前没有 Git Worktree、Workspace 文件锁或自动 merge。未来可用 Worktree 为每个任务建立独立副本，再增加 diff/review/merge 流程，本版本不实现。
 
 ### Verification Guard
 

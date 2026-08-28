@@ -71,7 +71,13 @@ class SessionRow(QWidget):
         self.set_session(session)
         self._sync_menu_visibility()
 
-    def set_session(self, session: Session, *, running_text: str = "") -> None:
+    def set_session(
+        self,
+        session: Session,
+        *,
+        running_text: str = "",
+        failed: bool = False,
+    ) -> None:
         self.title_label.setText(session.title)
         self.title_label.setToolTip(session.title)
         self.workspace_label.setText(session.workspace.rsplit("\\", 1)[-1].rsplit("/", 1)[-1])
@@ -79,9 +85,13 @@ class SessionRow(QWidget):
         markers: list[str] = []
         if session.pinned:
             markers.append("↑")
-        if session.unread:
+        if running_text:
+            markers.append(running_text)
+        elif failed and session.unread:
+            markers.append("!")
+        elif session.unread:
             markers.append("●")
-        self.marker_label.setText(running_text or "  ".join(markers))
+        self.marker_label.setText("  ".join(markers))
         self.marker_label.setToolTip(
             tr(self.language, "running")
             if running_text
