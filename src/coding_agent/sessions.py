@@ -27,6 +27,8 @@ class Session:
     model: str = "deepseek-v4-flash"
     reasoning_effort: str = "high"
     preferred_language: str = "zh"
+    pinned: bool = False
+    unread: bool = False
     created_at: str = field(default_factory=_now)
     updated_at: str = field(default_factory=_now)
     transcript: list[JsonObject] = field(default_factory=list)
@@ -45,10 +47,16 @@ class Session:
         transcript = payload.get("transcript", [])
         context = payload.get("model_context")
         preferred_language = payload.get("preferred_language", "zh")
+        pinned = payload.get("pinned", False)
+        unread = payload.get("unread", False)
         if not isinstance(transcript, list) or (context is not None and not isinstance(context, dict)):
             raise ValueError("Session conversation data is malformed")
         if preferred_language not in {"zh", "en"}:
             preferred_language = "zh"
+        if not isinstance(pinned, bool):
+            pinned = False
+        if not isinstance(unread, bool):
+            unread = False
         return cls(
             id=payload["id"],
             title=payload["title"],
@@ -56,6 +64,8 @@ class Session:
             model=payload["model"],
             reasoning_effort=payload["reasoning_effort"],
             preferred_language=preferred_language,
+            pinned=pinned,
+            unread=unread,
             created_at=str(payload.get("created_at", _now())),
             updated_at=str(payload.get("updated_at", _now())),
             transcript=transcript,
@@ -121,7 +131,11 @@ class SessionStore:
                 sessions.append(Session.from_dict(json.loads(path.read_text(encoding="utf-8"))))
             except (OSError, ValueError, json.JSONDecodeError):
                 continue
-        return sorted(sessions, key=lambda item: item.updated_at, reverse=True)
+        return sorted(
+            sessions,
+            key=lambda item: (item.pinned, item.updated_at),
+            reverse=True,
+        )
 
     def delete(self, session_id: str) -> None:
         try:

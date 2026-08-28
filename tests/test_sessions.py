@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import json
 from typing import Sequence
 
 from coding_agent.llm import AssistantResponse
@@ -46,6 +47,40 @@ def test_session_store_crud_and_restart(tmp_path: Path) -> None:
 
     restarted.delete(created.id)
     assert restarted.list() == []
+
+
+def test_optional_sidebar_metadata_is_backward_compatible(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    store = SessionStore(tmp_path / "state")
+    session = store.create(workspace=workspace)
+    path = store.sessions_dir / f"{session.id}.json"
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    payload.pop("pinned", None)
+    payload.pop("unread", None)
+    path.write_text(json.dumps(payload), encoding="utf-8")
+
+    loaded = store.load(session.id)
+
+    assert loaded.pinned is False
+    assert loaded.unread is False
+    assert loaded.workspace == str(workspace.resolve())
+    assert loaded.transcript == session.transcript
+    assert loaded.model_context == session.model_context
+
+
+def test_pinned_sessions_sort_before_newer_normal_sessions(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    store = SessionStore(tmp_path / "state")
+    pinned = store.create(workspace=workspace, title="Pinned")
+    pinned.pinned = True
+    store.save(pinned)
+    normal = store.create(workspace=workspace, title="Newer normal")
+
+    ordered = store.list()
+
+    assert [session.id for session in ordered] == [pinned.id, normal.id]
 
 
 def test_destroy_reload_then_second_turn_receives_prior_context(tmp_path: Path) -> None:

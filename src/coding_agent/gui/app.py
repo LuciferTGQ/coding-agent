@@ -7,8 +7,8 @@ from pathlib import Path
 import shutil
 import sys
 
-from PySide6.QtCore import Qt
-from PySide6.QtGui import QCloseEvent, QKeySequence, QShortcut
+from PySide6.QtCore import QProcess, QTimer, Qt, QUrl
+from PySide6.QtGui import QCloseEvent, QDesktopServices, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QApplication,
     QComboBox,
@@ -18,10 +18,13 @@ from PySide6.QtWidgets import (
     QFormLayout,
     QFrame,
     QHBoxLayout,
+    QInputDialog,
     QLabel,
+    QLineEdit,
     QListWidget,
     QListWidgetItem,
     QMainWindow,
+    QMenu,
     QMessageBox,
     QPushButton,
     QSplitter,
@@ -33,6 +36,7 @@ from PySide6.QtWidgets import (
 
 from coding_agent.agent import AgentEvent, AgentResult
 from coding_agent.gui.i18n import tr
+from coding_agent.gui.sidebar import SessionRow
 from coding_agent.gui.settings import (
     MODELS,
     REASONING_EFFORTS,
@@ -43,6 +47,21 @@ from coding_agent.gui.widgets import ConversationView
 from coding_agent.gui.worker import AgentWorker
 from coding_agent.session_runtime import SessionRuntime
 from coding_agent.sessions import Session, SessionStore
+
+
+def start_replacement_gui() -> bool:
+    """Start a fresh GUI process without terminating the current process forcibly."""
+
+    launcher = Path(sys.argv[0]).resolve()
+    if not getattr(sys, "frozen", False) and launcher.suffix.casefold() == ".py":
+        arguments = [str(launcher), *sys.argv[1:]]
+    elif getattr(sys, "frozen", False):
+        result = QProcess.startDetached(sys.executable, sys.argv[1:], str(Path.cwd()))
+        return result[0] if isinstance(result, tuple) else bool(result)
+    else:
+        arguments = ["-m", "coding_agent.gui", *sys.argv[1:]]
+    result = QProcess.startDetached(sys.executable, arguments, str(Path.cwd()))
+    return result[0] if isinstance(result, tuple) else bool(result)
 
 
 class SettingsDialog(QDialog):
@@ -102,6 +121,11 @@ class MainWindow(QMainWindow):
         )
         self.current_session: Session | None = None
         self.worker: AgentWorker | None = None
+        self.running_session_id: str | None = None
+        self._run_dots = 0
+        self.run_timer = QTimer(self)
+        self.run_timer.setInterval(450)
+        self.run_timer.timeout.connect(self._advance_run_indicator)
         self.attachments: list[str] = []
         self.setWindowTitle("Coding Agent")
         self.resize(1240, 820)
@@ -123,21 +147,25 @@ class MainWindow(QMainWindow):
         self.new_button = QPushButton(tr(self.language, "new_conversation"))
         self.new_button.setObjectName("primaryButton")
         self.new_button.clicked.connect(self.new_session)
+        self.search_input = QLineEdit()
+        self.search_input.setObjectName("sessionSearch")
+        self.search_input.setPlaceholderText(tr(self.language, "search_conversations"))
+        self.search_input.setClearButtonEnabled(True)
+        self.search_input.textChanged.connect(self._filter_sessions)
         self.session_list = QListWidget()
         self.session_list.setObjectName("sessionList")
         self.session_list.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.session_list.setTextElideMode(Qt.ElideRight)
         self.session_list.currentItemChanged.connect(self._session_selected)
+        self.session_list.itemSelectionChanged.connect(self._sync_session_rows)
         self.settings_button = QPushButton(tr(self.language, "settings"))
         self.settings_button.clicked.connect(self.open_settings)
-        self.delete_button = QPushButton(tr(self.language, "delete_conversation"))
-        self.delete_button.clicked.connect(self.delete_session)
         side_layout.addWidget(brand)
         side_layout.addWidget(self.new_button)
-        side_layout.addSpacing(8)
+        side_layout.addWidget(self.search_input)
+        side_layout.addSpacing(4)
         side_layout.addWidget(self.session_list, 1)
         side_layout.addWidget(self.settings_button)
-        side_layout.addWidget(self.delete_button)
 
         right = QWidget()
         right_layout = QVBoxLayout(right)
@@ -213,27 +241,74 @@ class MainWindow(QMainWindow):
 
         send_shortcut = QShortcut(QKeySequence("Ctrl+Return"), self)
         send_shortcut.activated.connect(self.send_message)
+        new_shortcut = QShortcut(QKeySequence.New, self)
+        new_shortcut.activated.connect(self.new_session)
+        settings_shortcut = QShortcut(QKeySequence("Ctrl+,"), self)
+        settings_shortcut.activated.connect(self.open_settings)
 
-    def refresh_sessions(self, select_id: str | None = None) -> None:
+    def refresh_sessions(
+        self,
+        select_id: str | None = None,
+        *,
+        reload_selected: bool = True,
+    ) -> None:
         current_id = select_id or (self.current_session.id if self.current_session else None)
+        query = self.search_input.text().strip().casefold()
+        all_sessions = self.store.list()
+        sessions = [
+            session
+            for session in all_sessions
+            if not query
+            or query in session.title.casefold()
+            or query in session.workspace.casefold()
+            or query in Path(session.workspace).name.casefold()
+        ]
         self.session_list.blockSignals(True)
         self.session_list.clear()
         selected: QListWidgetItem | None = None
-        for session in self.store.list():
-            item = QListWidgetItem(f"{session.title}\n{Path(session.workspace).name}")
+        for session in sessions:
+            item = QListWidgetItem()
             item.setData(Qt.UserRole, session.id)
             item.setToolTip(session.workspace)
             self.session_list.addItem(item)
+            row = SessionRow(session, self.language)
+            row.clicked.connect(lambda target=item: self.session_list.setCurrentItem(target))
+            row.menu_requested.connect(
+                lambda session_id=session.id, source=row.menu_button: self._show_session_menu(
+                    session_id, source
+                )
+            )
+            running = (
+                "." * self._run_dots
+                if session.id == self.running_session_id and self._run_dots
+                else ""
+            )
+            row.set_session(session, running_text=running)
+            item.setSizeHint(row.sizeHint())
+            self.session_list.setItemWidget(item, row)
             if session.id == current_id:
                 selected = item
-        self.session_list.blockSignals(False)
         if selected:
             self.session_list.setCurrentItem(selected)
-            self.load_session(selected.data(Qt.UserRole))
-        elif self.session_list.count():
+        elif self.session_list.count() and reload_selected:
             self.session_list.setCurrentRow(0)
-        else:
+            selected = self.session_list.currentItem()
+        self.session_list.blockSignals(False)
+        self._sync_session_rows()
+        if selected and reload_selected:
+            self.load_session(selected.data(Qt.UserRole))
+        elif not all_sessions:
             self._show_empty_state()
+
+    def _filter_sessions(self) -> None:
+        self.refresh_sessions(reload_selected=False)
+
+    def _sync_session_rows(self) -> None:
+        for index in range(self.session_list.count()):
+            item = self.session_list.item(index)
+            row = self.session_list.itemWidget(item)
+            if isinstance(row, SessionRow):
+                row.set_selected(item.isSelected())
 
     def new_session(self) -> None:
         if self.worker:
@@ -253,24 +328,122 @@ class MainWindow(QMainWindow):
         self.refresh_sessions(session.id)
         self.editor.setFocus()
 
-    def delete_session(self) -> None:
-        if not self.current_session or self.worker:
+    def delete_session(self, session_id: str | None = None) -> None:
+        if self.worker:
             return
+        target_id = session_id or (self.current_session.id if self.current_session else None)
+        if not target_id:
+            return
+        session = self.store.load(target_id)
         answer = QMessageBox.question(
             self,
             tr(self.language, "delete_title"),
-            tr(self.language, "delete_question", title=self.current_session.title),
+            tr(self.language, "delete_question", title=session.title),
         )
         if answer == QMessageBox.Yes:
-            self.store.delete(self.current_session.id)
-            self.current_session = None
+            self.store.delete(target_id)
+            if self.current_session and self.current_session.id == target_id:
+                self.current_session = None
             self.refresh_sessions()
+
+    def rename_session(self, session_id: str) -> None:
+        if self.worker:
+            return
+        session = self.store.load(session_id)
+        title, accepted = QInputDialog.getText(
+            self,
+            tr(self.language, "rename_title"),
+            tr(self.language, "rename_label"),
+            text=session.title,
+        )
+        if not accepted:
+            return
+        title = title.strip()
+        if not title:
+            QMessageBox.warning(
+                self,
+                tr(self.language, "rename_empty_title"),
+                tr(self.language, "rename_empty_message"),
+            )
+            return
+        self._rename_session(session_id, title)
+
+    def _rename_session(self, session_id: str, title: str) -> None:
+        session = self.store.load(session_id)
+        session.title = title.strip()
+        if not session.title:
+            raise ValueError("Session title must not be empty")
+        self.store.save(session)
+        if self.current_session and self.current_session.id == session_id:
+            self.current_session = session
+            self.title_label.setText(session.title)
+        self.refresh_sessions(session_id, reload_selected=False)
+
+    def toggle_session_pinned(self, session_id: str) -> None:
+        session = self.store.load(session_id)
+        session.pinned = not session.pinned
+        self.store.save(session)
+        if self.current_session and self.current_session.id == session_id:
+            self.current_session = session
+        self.refresh_sessions(session_id, reload_selected=False)
+
+    def set_session_unread(self, session_id: str, unread: bool) -> None:
+        session = self.store.load(session_id)
+        session.unread = unread
+        self.store.save(session)
+        if self.current_session and self.current_session.id == session_id:
+            self.current_session = session
+        self.refresh_sessions(session_id, reload_selected=False)
+
+    def open_session_workspace(self, session_id: str) -> None:
+        session = self.store.load(session_id)
+        if not QDesktopServices.openUrl(QUrl.fromLocalFile(session.workspace)):
+            QMessageBox.warning(
+                self,
+                tr(self.language, "open_workspace_failed_title"),
+                tr(
+                    self.language,
+                    "open_workspace_failed_message",
+                    workspace=session.workspace,
+                ),
+            )
+
+    def _show_session_menu(self, session_id: str, source: QWidget) -> None:
+        if self.worker:
+            return
+        session = self.store.load(session_id)
+        menu = QMenu(self)
+        rename_action = menu.addAction(tr(self.language, "rename"))
+        pin_action = menu.addAction(tr(self.language, "unpin" if session.pinned else "pin"))
+        unread_action = menu.addAction(
+            tr(self.language, "mark_read" if session.unread else "mark_unread")
+        )
+        open_action = menu.addAction(tr(self.language, "open_workspace"))
+        menu.addSeparator()
+        delete_action = menu.addAction(tr(self.language, "delete_conversation"))
+        chosen = menu.exec(source.mapToGlobal(source.rect().bottomLeft()))
+        if chosen == rename_action:
+            self.rename_session(session_id)
+        elif chosen == pin_action:
+            self.toggle_session_pinned(session_id)
+        elif chosen == unread_action:
+            self.set_session_unread(session_id, not session.unread)
+        elif chosen == open_action:
+            self.open_session_workspace(session_id)
+        elif chosen == delete_action:
+            self.delete_session(session_id)
 
     def load_session(self, session_id: str) -> None:
         self.current_session = self.store.load(session_id)
         session = self.current_session
+        metadata_changed = False
         if session.preferred_language != self.language:
             session.preferred_language = self.language
+            metadata_changed = True
+        if session.unread:
+            session.unread = False
+            metadata_changed = True
+        if metadata_changed:
             self.store.save(session)
         self.title_label.setText(session.title)
         self.workspace_label.setText(session.workspace)
@@ -287,6 +460,8 @@ class MainWindow(QMainWindow):
         self._update_attachments()
         self.conversation.render(session.transcript)
         self._set_controls_enabled(True)
+        if metadata_changed:
+            self.refresh_sessions(session.id, reload_selected=False)
 
     def change_workspace(self) -> None:
         if self.worker:
@@ -453,7 +628,9 @@ class MainWindow(QMainWindow):
         dialog = SettingsDialog(self.settings, self.language, self)
         if dialog.exec() != QDialog.Accepted:
             return
-        updated = dialog.values()
+        self._apply_settings(dialog.values())
+
+    def _apply_settings(self, updated: AppSettings) -> None:
         language_changed = updated.language != self.language
         self.settings_store.save(updated)
         self.settings = updated
@@ -462,12 +639,29 @@ class MainWindow(QMainWindow):
             language=self.language,
             max_steps=updated.max_steps,
         )
-        if language_changed:
-            QMessageBox.information(
+        if language_changed and self._confirm_restart():
+            self._restart_application()
+
+    def _confirm_restart(self) -> bool:
+        prompt = QMessageBox(self)
+        prompt.setIcon(QMessageBox.Question)
+        prompt.setWindowTitle(tr(self.language, "restart_title"))
+        prompt.setText(tr(self.language, "restart_message"))
+        later = prompt.addButton(tr(self.language, "restart_later"), QMessageBox.RejectRole)
+        restart = prompt.addButton(tr(self.language, "restart_now"), QMessageBox.AcceptRole)
+        prompt.exec()
+        return prompt.clickedButton() == restart and prompt.clickedButton() != later
+
+    def _restart_application(self) -> bool:
+        if not start_replacement_gui():
+            QMessageBox.warning(
                 self,
-                tr(self.language, "restart_title"),
-                tr(self.language, "restart_message"),
+                tr(self.language, "restart_failed_title"),
+                tr(self.language, "restart_failed_message"),
             )
+            return False
+        self.close()
+        return True
 
     def _settings_changed(self) -> None:
         if not self.current_session or self.worker:
@@ -490,6 +684,18 @@ class MainWindow(QMainWindow):
         self._set_controls_enabled(True)
 
     def _set_running(self, running: bool) -> None:
+        if running and self.current_session:
+            self.running_session_id = self.current_session.id
+            self._run_dots = 1
+            self.run_timer.start()
+            self._update_session_row(self.running_session_id)
+        elif not running:
+            previous = self.running_session_id
+            self.run_timer.stop()
+            self.running_session_id = None
+            self._run_dots = 0
+            if previous:
+                self._update_session_row(previous)
         self._set_controls_enabled(not running)
         self.stop_button.setVisible(running)
         self.stop_button.setEnabled(running)
@@ -505,8 +711,8 @@ class MainWindow(QMainWindow):
             self.model_combo,
             self.effort_combo,
             self.send_button,
-            self.delete_button,
             self.settings_button,
+            self.search_input,
             self.session_list,
             self.new_button,
         ):
@@ -515,6 +721,32 @@ class MainWindow(QMainWindow):
                 if widget not in {self.new_button, self.session_list, self.settings_button}
                 else enabled
             )
+
+    def _advance_run_indicator(self) -> None:
+        if not self.running_session_id:
+            self.run_timer.stop()
+            return
+        self._run_dots = self._run_dots % 3 + 1
+        self._update_session_row(self.running_session_id)
+
+    def _update_session_row(self, session_id: str) -> None:
+        try:
+            session = self.store.load(session_id)
+        except KeyError:
+            return
+        for index in range(self.session_list.count()):
+            item = self.session_list.item(index)
+            if item.data(Qt.UserRole) != session_id:
+                continue
+            row = self.session_list.itemWidget(item)
+            if isinstance(row, SessionRow):
+                running = (
+                    "." * self._run_dots
+                    if session_id == self.running_session_id and self._run_dots
+                    else ""
+                )
+                row.set_session(session, running_text=running)
+            break
 
     def _update_attachments(self) -> None:
         self.attachment_label.setText(
@@ -570,12 +802,19 @@ QPushButton:disabled { color: #5d6472; background: #191c22; }
 #primaryButton:hover { background: #3d73e0; }
 #stopButton { background: #40252a; border-color: #73404a; color: #ffb4bc; }
 #workspaceButton { background: transparent; border: none; color: #96a9ca; padding: 2px; text-align: left; }
-QTextEdit, QPlainTextEdit, QComboBox { background: #191c23; border: 1px solid #303643; border-radius: 6px; selection-background-color: #355fba; }
+QTextEdit, QPlainTextEdit, QComboBox, QLineEdit { background: #191c23; border: 1px solid #303643; border-radius: 6px; selection-background-color: #355fba; }
 QTextEdit { padding: 10px; font-size: 14px; }
 QComboBox { padding: 6px 9px; min-width: 120px; }
+#sessionSearch { padding: 7px 9px; margin: 2px 0 4px; }
 QListWidget { background: transparent; border: none; outline: none; }
-QListWidget::item { padding: 10px 9px; border-radius: 6px; margin: 2px 0; color: #b7c0cf; }
-QListWidget::item:selected { background: #252b36; color: white; }
+QListWidget::item { padding: 0; border-radius: 6px; margin: 2px 0; }
+QListWidget::item:selected { background: #252b36; }
+SessionRow { background: transparent; border-radius: 6px; }
+SessionRow[selected="true"] { background: #252b36; }
+#sessionTitle { color: #c5cedd; font-weight: 550; }
+#sessionWorkspace { color: #747f92; font-size: 10px; }
+#sessionMarker { color: #8baaf0; font-size: 11px; }
+#sessionMenuButton { color: #9ca8ba; padding: 2px; min-width: 24px; }
 #userBubble { background: #294e91; border: 1px solid #3864ad; border-radius: 10px; }
 #assistantBubble { background: #1a1e26; border: 1px solid #2d3441; border-radius: 10px; }
 #bubbleHeading { color: #9eabc0; font-size: 10px; font-weight: 700; }

@@ -115,9 +115,11 @@ system prompt 是 stable context。每个用户请求开启一个 turn；期间�
 
 ### SessionStore 与桌面层
 
-`SessionStore` 在 `~/.nju-coding-agent/sessions/` 中以单会话 JSON 文件保存 id、标题、Workspace、模型、reasoning effort、UTC 时间、完整 UI transcript 和序列化的模型上下文。写入先落到临时文件，再用原子 replace 提交；API Key 不属于 Session 数据结构。
+`SessionStore` 在 `~/.nju-coding-agent/sessions/` 中以单会话 JSON 文件保存 id、标题、Workspace、模型、reasoning effort、UTC 时间、置顶/未读 metadata、完整 UI transcript 和序列化的模型上下文。新增 metadata 仍使用 schema v1 的可选默认字段，因此旧 Session 无需迁移即可加载。置顶会话和普通会话分别按 `updated_at` 倒序排列。写入先落到临时文件，再用原子 replace 提交；API Key 不属于 Session 数据结构。
 
-GUI 文案由一个集中维护的 `zh/en` 映射提供，不使用额外 locale framework。`settings.json` 只保存语言、默认模型、默认 reasoning effort 和默认最大步骤；语言变更在下次启动时生效，避免运行中重建历史控件。界面语言也会更新同一个 `ContextManager` 的 stable system prompt，只约束用户可见交流语言，不改变 Tool 名称、JSON Schema 或 provider message 协议。
+GUI 文案由一个集中维护的 `zh/en` 映射提供，不使用额外 locale framework。`settings.json` 只保存语言、默认模型、默认 reasoning effort 和默认最大步骤；保存语言变更后可稍后生效，也可用 `QProcess.startDetached` 启动新 GUI 进程并正常关闭当前窗口。界面语言也会更新同一个 `ContextManager` 的 stable system prompt，只约束用户可见交流语言，不改变 Tool 名称、JSON Schema 或 provider message 协议。
+
+侧边栏搜索仅过滤 Session 标题和 Workspace 路径，不读取 transcript。置顶、未读属于持久 Session metadata；执行中的点动画只属于当前窗口状态，不写入 transcript、模型上下文或 Tool 协议。重命名、打开目录和删除 Session 都不会修改 Workspace 文件。
 
 完整 transcript 和 provider context 是两份目的不同的数据：前者保留 reasoning、工具状态、diff、命令输出和最终回答，供 UI 恢复；后者由 `ContextManager` 按预算裁剪，只保留协议正确、足够继续推理的消息。销毁窗口并重新加载 Session 后，新用户消息会追加到恢复的 Context，而不是重新开始单轮任务。
 

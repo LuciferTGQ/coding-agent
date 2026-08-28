@@ -5,9 +5,11 @@ from pathlib import Path
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
+from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QApplication
 
 from coding_agent.agent import AgentEvent
+import coding_agent.gui.app as gui_app
 from coding_agent.gui.app import MainWindow
 from coding_agent.gui.settings import AppSettings, SettingsStore
 from coding_agent.sessions import SessionStore
@@ -79,6 +81,97 @@ def test_saved_english_setting_applies_to_next_window(tmp_path: Path) -> None:
     assert window.runtime.max_steps == 17
     window.close()
     app.processEvents()
+
+
+def test_search_filters_title_and_workspace_without_loading_transcript(tmp_path: Path) -> None:
+    app = _app()
+    alpha_workspace = tmp_path / "alpha-project"
+    beta_workspace = tmp_path / "beta-project"
+    alpha_workspace.mkdir()
+    beta_workspace.mkdir()
+    store = SessionStore(tmp_path / "search-state")
+    alpha = store.create(workspace=alpha_workspace, title="Fix parser")
+    store.create(workspace=beta_workspace, title="Update docs")
+    window = MainWindow(store)
+
+    window.search_input.setText("parser")
+    app.processEvents()
+    assert window.session_list.count() == 1
+    assert window.session_list.item(0).data(Qt.UserRole) == alpha.id
+
+    window.search_input.setText("beta-project")
+    app.processEvents()
+    assert window.session_list.count() == 1
+    window.search_input.clear()
+    assert window.session_list.count() == 2
+    window.close()
+    app.processEvents()
+
+
+def test_rename_and_unread_metadata_preserve_session_history(tmp_path: Path) -> None:
+    app = _app()
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    store = SessionStore(tmp_path / "metadata-state")
+    session = store.create(workspace=workspace, title="Original")
+    session.transcript = [{"type": "user", "text": "keep me"}]
+    session.model_context = {"system": {"role": "system", "content": "keep"}, "turns": []}
+    store.save(session)
+    window = MainWindow(store)
+
+    window._rename_session(session.id, "  Renamed  ")
+    window.set_session_unread(session.id, True)
+    loaded = store.load(session.id)
+
+    assert loaded.title == "Renamed"
+    assert loaded.unread is True
+    assert loaded.workspace == str(workspace.resolve())
+    assert loaded.transcript == session.transcript
+    assert loaded.model_context == session.model_context
+    window.close()
+    app.processEvents()
+
+
+def test_opening_an_unread_session_marks_it_read(tmp_path: Path) -> None:
+    app = _app()
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    store = SessionStore(tmp_path / "read-state")
+    session = store.create(workspace=workspace)
+    session.unread = True
+    store.save(session)
+
+    window = MainWindow(store)
+
+    assert store.load(session.id).unread is False
+    window.close()
+    app.processEvents()
+
+
+def test_language_setting_can_restart_now_or_stay_until_later(
+    tmp_path: Path, monkeypatch
+) -> None:
+    app = _app()
+    store = SessionStore(tmp_path / "restart-state")
+    window = MainWindow(store)
+    window.show()
+    restarted: list[bool] = []
+    monkeypatch.setattr(window, "_confirm_restart", lambda: False)
+    monkeypatch.setattr(gui_app, "start_replacement_gui", lambda: restarted.append(True) or True)
+
+    english = AppSettings(language="en", max_steps=31)
+    window._apply_settings(english)
+
+    assert window.isVisible()
+    assert restarted == []
+    assert SettingsStore(store.root).load() == english
+    assert window.language == "zh"
+
+    monkeypatch.setattr(window, "_confirm_restart", lambda: True)
+    window._apply_settings(english)
+    app.processEvents()
+    assert restarted == [True]
+    assert not window.isVisible()
 
 
 def test_long_restored_transcript_does_not_overlap_and_scrolls_to_latest(tmp_path: Path) -> None:
