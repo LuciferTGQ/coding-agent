@@ -100,9 +100,30 @@ def _looks_like_verification(argv: list[str]) -> bool:
     if any(marker in joined for marker in markers):
         return True
     executable = lowered[0]
-    return executable.startswith("python") and any(
-        part.endswith(".py") for part in lowered[1:]
-    )
+    if executable.startswith("python"):
+        if any(part.endswith(".py") for part in lowered[1:]):
+            return True
+        inline = _inline_program(lowered, "-c")
+        return inline is not None and any(
+            marker in inline
+            for marker in ("html.parser", "ast.parse", "compile(", "py_compile")
+        )
+    if executable in {"node", "node.exe"}:
+        if "--check" in lowered[1:]:
+            return True
+        inline = _inline_program(lowered, "-e")
+        return inline is not None and any(
+            marker in inline for marker in ("vm.script", "new function(")
+        )
+    return False
+
+
+def _inline_program(argv: list[str], option: str) -> str | None:
+    try:
+        index = argv.index(option)
+    except ValueError:
+        return None
+    return argv[index + 1] if index + 1 < len(argv) else None
 
 
 def create_command_tool(
@@ -209,4 +230,3 @@ def create_command_tool(
         },
         run_command,
     )
-

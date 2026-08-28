@@ -274,8 +274,8 @@ class MainWindow(QMainWindow):
             row = SessionRow(session, self.language)
             row.clicked.connect(lambda target=item: self.session_list.setCurrentItem(target))
             row.menu_requested.connect(
-                lambda session_id=session.id, source=row.menu_button: self._show_session_menu(
-                    session_id, source
+                lambda position, session_id=session.id: self._show_session_menu(
+                    session_id, position
                 )
             )
             running = (
@@ -317,6 +317,8 @@ class MainWindow(QMainWindow):
             self, tr(self.language, "choose_workspace"), str(Path.cwd())
         )
         if not directory:
+            return
+        if not self._confirm_workspace_access(directory):
             return
         session = self.store.create(
             workspace=directory,
@@ -369,11 +371,10 @@ class MainWindow(QMainWindow):
         self._rename_session(session_id, title)
 
     def _rename_session(self, session_id: str, title: str) -> None:
-        session = self.store.load(session_id)
-        session.title = title.strip()
-        if not session.title:
+        title = title.strip()
+        if not title:
             raise ValueError("Session title must not be empty")
-        self.store.save(session)
+        session = self.store.update_metadata(session_id, title=title)
         if self.current_session and self.current_session.id == session_id:
             self.current_session = session
             self.title_label.setText(session.title)
@@ -381,16 +382,13 @@ class MainWindow(QMainWindow):
 
     def toggle_session_pinned(self, session_id: str) -> None:
         session = self.store.load(session_id)
-        session.pinned = not session.pinned
-        self.store.save(session)
+        session = self.store.update_metadata(session_id, pinned=not session.pinned)
         if self.current_session and self.current_session.id == session_id:
             self.current_session = session
         self.refresh_sessions(session_id, reload_selected=False)
 
     def set_session_unread(self, session_id: str, unread: bool) -> None:
-        session = self.store.load(session_id)
-        session.unread = unread
-        self.store.save(session)
+        session = self.store.update_metadata(session_id, unread=unread)
         if self.current_session and self.current_session.id == session_id:
             self.current_session = session
         self.refresh_sessions(session_id, reload_selected=False)
@@ -408,7 +406,7 @@ class MainWindow(QMainWindow):
                 ),
             )
 
-    def _show_session_menu(self, session_id: str, source: QWidget) -> None:
+    def _show_session_menu(self, session_id: str, position) -> None:
         if self.worker:
             return
         session = self.store.load(session_id)
@@ -421,7 +419,7 @@ class MainWindow(QMainWindow):
         open_action = menu.addAction(tr(self.language, "open_workspace"))
         menu.addSeparator()
         delete_action = menu.addAction(tr(self.language, "delete_conversation"))
-        chosen = menu.exec(source.mapToGlobal(source.rect().bottomLeft()))
+        chosen = menu.exec(position)
         if chosen == rename_action:
             self.rename_session(session_id)
         elif chosen == pin_action:
@@ -436,15 +434,14 @@ class MainWindow(QMainWindow):
     def load_session(self, session_id: str) -> None:
         self.current_session = self.store.load(session_id)
         session = self.current_session
-        metadata_changed = False
+        metadata_changes: dict[str, object] = {}
         if session.preferred_language != self.language:
-            session.preferred_language = self.language
-            metadata_changed = True
+            metadata_changes["preferred_language"] = self.language
         if session.unread:
-            session.unread = False
-            metadata_changed = True
-        if metadata_changed:
-            self.store.save(session)
+            metadata_changes["unread"] = False
+        if metadata_changes:
+            session = self.store.update_metadata(session.id, **metadata_changes)
+            self.current_session = session
         self.title_label.setText(session.title)
         self.workspace_label.setText(session.workspace)
         self.workspace_button.setText(
@@ -460,7 +457,7 @@ class MainWindow(QMainWindow):
         self._update_attachments()
         self.conversation.render(session.transcript)
         self._set_controls_enabled(True)
-        if metadata_changed:
+        if metadata_changes:
             self.refresh_sessions(session.id, reload_selected=False)
 
     def change_workspace(self) -> None:
@@ -473,6 +470,8 @@ class MainWindow(QMainWindow):
         if not directory:
             return
         if self.current_session and Path(directory).resolve() == Path(self.current_session.workspace):
+            return
+        if not self._confirm_workspace_access(directory):
             return
         if self.current_session and self.current_session.transcript:
             answer = QMessageBox.warning(
@@ -505,6 +504,25 @@ class MainWindow(QMainWindow):
                 preferred_language=self.language,
             )
         self.refresh_sessions(session.id)
+
+    def _confirm_workspace_access(self, directory: str) -> bool:
+        workspace = str(Path(directory).expanduser().resolve())
+        prompt = QMessageBox(self)
+        prompt.setIcon(QMessageBox.Warning)
+        prompt.setWindowTitle(tr(self.language, "workspace_authorization_title"))
+        prompt.setText(
+            tr(
+                self.language,
+                "workspace_authorization_message",
+                workspace=workspace,
+            )
+        )
+        cancel = prompt.addButton(tr(self.language, "cancel"), QMessageBox.RejectRole)
+        allow = prompt.addButton(
+            tr(self.language, "allow_workspace"), QMessageBox.AcceptRole
+        )
+        prompt.exec()
+        return prompt.clickedButton() == allow and prompt.clickedButton() != cancel
 
     def attach_files(self) -> None:
         if not self.current_session or self.worker:
@@ -601,16 +619,22 @@ class MainWindow(QMainWindow):
             )
         elif event.kind == "final":
             self.conversation.finish_assistant(event.message)
-        elif event.kind in {"verification", "stopped"}:
+        elif event.kind in {
+            "verification",
+            "stopped",
+            "persistence_warning",
+            "persistence_recovered",
+        }:
             self.conversation.add_event_status(event.kind, event.message, event.ok)
 
     def _run_completed(self, result: AgentResult) -> None:
         if result.status != "completed" and result.status != "cancelled":
             self.conversation.add_event_status("stopped", result.final_answer, False)
 
-    def _run_failed(self, message: str) -> None:
+    def _run_failed(self, category: str, message: str) -> None:
         self.conversation.add_status(message, False)
-        QMessageBox.critical(self, tr(self.language, "agent_failed"), message)
+        title_key = "session_persistence_failed" if category == "persistence" else "agent_failed"
+        QMessageBox.critical(self, tr(self.language, title_key), message)
 
     def _worker_finished(self) -> None:
         session_id = self.current_session.id if self.current_session else None
@@ -666,9 +690,11 @@ class MainWindow(QMainWindow):
     def _settings_changed(self) -> None:
         if not self.current_session or self.worker:
             return
-        self.current_session.model = self.model_combo.currentText()
-        self.current_session.reasoning_effort = self.effort_combo.currentText()
-        self.store.save(self.current_session)
+        self.current_session = self.store.update_metadata(
+            self.current_session.id,
+            model=self.model_combo.currentText(),
+            reasoning_effort=self.effort_combo.currentText(),
+        )
 
     def _session_selected(self, current: QListWidgetItem | None) -> None:
         if current and not self.worker:
@@ -810,11 +836,12 @@ QListWidget { background: transparent; border: none; outline: none; }
 QListWidget::item { padding: 0; border-radius: 6px; margin: 2px 0; }
 QListWidget::item:selected { background: #252b36; }
 SessionRow { background: transparent; border-radius: 6px; }
+SessionRow[hovered="true"] { background: #1e222b; }
 SessionRow[selected="true"] { background: #252b36; }
 #sessionTitle { color: #c5cedd; font-weight: 550; }
 #sessionWorkspace { color: #747f92; font-size: 10px; }
 #sessionMarker { color: #8baaf0; font-size: 11px; }
-#sessionMenuButton { color: #9ca8ba; padding: 2px; min-width: 24px; }
+#sessionMenuButton { color: #aab5c6; font-weight: 700; padding: 2px; min-width: 24px; }
 #userBubble { background: #294e91; border: 1px solid #3864ad; border-radius: 10px; }
 #assistantBubble { background: #1a1e26; border: 1px solid #2d3441; border-radius: 10px; }
 #bubbleHeading { color: #9eabc0; font-size: 10px; font-weight: 700; }

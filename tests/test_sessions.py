@@ -2,12 +2,16 @@ from __future__ import annotations
 
 from pathlib import Path
 import json
+import os
+import sys
+from concurrent.futures import ThreadPoolExecutor
 from typing import Sequence
 
 from coding_agent.llm import AssistantResponse
 from coding_agent.llm import ModelError
+from coding_agent.llm import ToolCall
 from coding_agent.session_runtime import SessionRuntime
-from coding_agent.sessions import SessionStore
+from coding_agent.sessions import SessionPersistenceError, SessionStore
 
 
 class FakeModel:
@@ -81,6 +85,158 @@ def test_pinned_sessions_sort_before_newer_normal_sessions(tmp_path: Path) -> No
     ordered = store.list()
 
     assert [session.id for session in ordered] == [pinned.id, normal.id]
+
+
+def test_transient_permission_error_retries_with_unique_temp_and_cleans_up(
+    tmp_path: Path, monkeypatch
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    store = SessionStore(tmp_path / "state", replace_retry_delays=(0, 0))
+    session = store.create(workspace=workspace)
+    real_replace = os.replace
+    sources: list[Path] = []
+
+    def flaky_replace(source, target) -> None:
+        sources.append(Path(source))
+        if len(sources) < 3:
+            raise PermissionError(5, "temporarily denied")
+        real_replace(source, target)
+
+    monkeypatch.setattr(os, "replace", flaky_replace)
+    session.transcript.append({"type": "user", "text": "persist me"})
+    store.save(session)
+
+    assert len(sources) == 3
+    assert len({source.name for source in sources}) == 1
+    assert sources[0].name != f"{session.id}.json.tmp"
+    assert store.load(session.id).transcript[-1]["text"] == "persist me"
+    assert list(store.sessions_dir.glob("*.tmp")) == []
+
+
+def test_persistent_permission_error_is_reported_and_keeps_previous_json(
+    tmp_path: Path, monkeypatch
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    store = SessionStore(tmp_path / "state", replace_retry_delays=(0,))
+    session = store.create(workspace=workspace, title="Original")
+    monkeypatch.setattr(
+        os,
+        "replace",
+        lambda *_: (_ for _ in ()).throw(PermissionError(5, "still denied")),
+    )
+    session.title = "Not committed"
+
+    try:
+        store.save(session)
+    except SessionPersistenceError as exc:
+        assert "after 2 attempts" in str(exc)
+    else:
+        raise AssertionError("expected bounded persistence failure")
+
+    assert store.load(session.id).title == "Original"
+    assert list(store.sessions_dir.glob("*.tmp")) == []
+
+
+def test_runtime_save_preserves_concurrent_metadata_patch(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    store = SessionStore(tmp_path / "state")
+    session = store.create(workspace=workspace)
+    runtime_copy = store.load(session.id)
+    runtime_copy.transcript.append({"type": "assistant", "text": "completed"})
+
+    store.update_metadata(session.id, pinned=True, title="Pinned title")
+    store.save_runtime(runtime_copy)
+    loaded = store.load(session.id)
+
+    assert loaded.pinned is True
+    assert loaded.title == "Pinned title"
+    assert loaded.transcript[-1]["text"] == "completed"
+
+
+def test_multiple_sessions_can_save_from_threads(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    store = SessionStore(tmp_path / "state")
+    sessions = [store.create(workspace=workspace, title=f"Session {index}") for index in range(6)]
+
+    def save_many(session_id: str) -> None:
+        for index in range(20):
+            session = store.load(session_id)
+            session.transcript.append({"type": "status", "text": str(index)})
+            store.save_runtime(session)
+
+    with ThreadPoolExecutor(max_workers=6) as pool:
+        list(pool.map(save_many, [session.id for session in sessions]))
+
+    assert all(len(store.load(session.id).transcript) == 20 for session in sessions)
+    assert list(store.sessions_dir.glob("*.tmp")) == []
+
+
+def test_tool_executes_after_intermediate_session_save_failure(
+    tmp_path: Path, monkeypatch
+) -> None:
+    class ToolModel:
+        def __init__(self) -> None:
+            self.responses = [
+                AssistantResponse(
+                    content="",
+                    tool_calls=(
+                        ToolCall(
+                            id="run",
+                            name="run_command",
+                            arguments=json.dumps(
+                                {
+                                    "argv": [
+                                        sys.executable,
+                                        "-c",
+                                        "from pathlib import Path; Path('executed.txt').write_text('yes')",
+                                    ]
+                                }
+                            ),
+                        ),
+                    ),
+                    provider_message={"role": "assistant", "content": "", "tool_calls": []},
+                ),
+                AssistantResponse(
+                    content="Done",
+                    tool_calls=(),
+                    provider_message={"role": "assistant", "content": "Done"},
+                ),
+            ]
+
+        def complete(self, *, messages: Sequence[dict], tools: Sequence[dict]) -> AssistantResponse:
+            return self.responses.pop(0)
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    store = SessionStore(tmp_path / "state")
+    session = store.create(workspace=workspace)
+    real_save = store.save_runtime
+    calls = 0
+
+    def fail_tool_call_save(value) -> None:
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            raise SessionPersistenceError("deterministic tool_call save failure")
+        real_save(value)
+
+    monkeypatch.setattr(store, "save_runtime", fail_tool_call_save)
+    events = []
+    result = SessionRuntime(store, model_factory=lambda _: ToolModel()).run_turn(
+        session.id, "run it", on_event=events.append, stream=False
+    )
+
+    assert result.status == "completed"
+    assert (workspace / "executed.txt").read_text(encoding="utf-8") == "yes"
+    assert any(event.kind == "persistence_warning" for event in events)
+    assert any(event.kind == "persistence_recovered" for event in events)
+    transcript = store.load(session.id).transcript
+    assert any(item.get("type") == "tool_result" for item in transcript)
+    assert transcript[-1]["type"] == "assistant"
 
 
 def test_destroy_reload_then_second_turn_receives_prior_context(tmp_path: Path) -> None:

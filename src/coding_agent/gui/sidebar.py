@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from PySide6.QtCore import Qt, Signal
-from PySide6.QtGui import QEnterEvent, QMouseEvent
+from PySide6.QtGui import QContextMenuEvent, QEnterEvent, QMouseEvent
 from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
@@ -21,7 +21,7 @@ class SessionRow(QWidget):
     """A selectable session summary with a hover-only actions button."""
 
     clicked = Signal()
-    menu_requested = Signal()
+    menu_requested = Signal(object)
 
     def __init__(self, session: Session, language: str) -> None:
         super().__init__()
@@ -49,15 +49,24 @@ class SessionRow(QWidget):
         self.marker_label.setMinimumWidth(28)
         self.menu_button = QToolButton()
         self.menu_button.setObjectName("sessionMenuButton")
-        self.menu_button.setText("···")
+        self.menu_button.setText("...")
         self.menu_button.setAutoRaise(True)
         self.menu_button.setToolTip(tr(language, "session_actions"))
-        self.menu_button.clicked.connect(self.menu_requested.emit)
+        self.menu_button.clicked.connect(
+            lambda: self.menu_requested.emit(
+                self.menu_button.mapToGlobal(self.menu_button.rect().bottomLeft())
+            )
+        )
+        menu_slot = QWidget()
+        menu_slot.setFixedWidth(28)
+        menu_layout = QHBoxLayout(menu_slot)
+        menu_layout.setContentsMargins(0, 0, 0, 0)
+        menu_layout.addWidget(self.menu_button)
         text_layout.addWidget(self.title_label)
         text_layout.addWidget(self.workspace_label)
         layout.addLayout(text_layout, 1)
         layout.addWidget(self.marker_label)
-        layout.addWidget(self.menu_button)
+        layout.addWidget(menu_slot)
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self.set_session(session)
         self._sync_menu_visibility()
@@ -88,18 +97,38 @@ class SessionRow(QWidget):
 
     def enterEvent(self, event: QEnterEvent) -> None:
         self._hovered = True
+        self._sync_style()
         self._sync_menu_visibility()
         super().enterEvent(event)
 
     def leaveEvent(self, event) -> None:
         self._hovered = False
+        self._sync_style()
         self._sync_menu_visibility()
         super().leaveEvent(event)
 
     def mousePressEvent(self, event: QMouseEvent) -> None:
         if event.button() == Qt.LeftButton:
             self.clicked.emit()
+        elif event.button() == Qt.RightButton:
+            self.menu_requested.emit(event.globalPosition().toPoint())
+            event.accept()
+            return
         super().mousePressEvent(event)
 
+    def contextMenuEvent(self, event: QContextMenuEvent) -> None:
+        # Mouse-triggered menus are handled in mousePressEvent so they also work
+        # reliably for QListWidget item widgets. Accept the synthesized event to
+        # avoid opening the same menu twice.
+        event.accept()
+
     def _sync_menu_visibility(self) -> None:
-        self.menu_button.setVisible(self._hovered or self._selected)
+        active = self._hovered or self._selected
+        self.menu_button.setVisible(True)
+        self.menu_button.setEnabled(active)
+        self.menu_button.setText("..." if active else "")
+
+    def _sync_style(self) -> None:
+        self.setProperty("hovered", self._hovered)
+        self.style().unpolish(self)
+        self.style().polish(self)

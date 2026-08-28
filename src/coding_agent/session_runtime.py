@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+import logging
 from pathlib import Path
 from typing import Callable, Iterable
 
@@ -11,13 +12,19 @@ from coding_agent.config import Config
 from coding_agent.context import ContextManager
 from coding_agent.llm import DeepSeekChatClient, ModelClient
 from coding_agent.prompts import build_system_prompt
-from coding_agent.sessions import Session, SessionStore, title_from_message
+from coding_agent.sessions import (
+    Session,
+    SessionPersistenceError,
+    SessionStore,
+    title_from_message,
+)
 from coding_agent.tools import ToolRegistry, create_command_tool, create_file_tools
 from coding_agent.workspace import Workspace
 
 
 EventCallback = Callable[[AgentEvent], None]
 ModelFactory = Callable[[Config], ModelClient]
+LOGGER = logging.getLogger(__name__)
 
 
 class SessionRuntime:
@@ -48,6 +55,56 @@ class SessionRuntime:
         stream: bool = True,
     ) -> AgentResult:
         session = self.store.load(session_id)
+        external_callback = on_event or (lambda _: None)
+        persistence_warning_active = False
+        pending_metadata_changes: dict[str, object] = {}
+
+        def report_persistence_failure(exc: SessionPersistenceError) -> None:
+            nonlocal persistence_warning_active
+            LOGGER.warning("Session persistence failed for %s: %s", session_id, exc)
+            if persistence_warning_active:
+                return
+            persistence_warning_active = True
+            warning = AgentEvent(
+                kind="persistence_warning",
+                step=0,
+                message=str(exc),
+                ok=False,
+            )
+            self._record_event(session, warning)
+            external_callback(warning)
+
+        def persist_session() -> bool:
+            nonlocal persistence_warning_active, session
+            if pending_metadata_changes:
+                try:
+                    updated = self.store.update_metadata(
+                        session.id, **pending_metadata_changes
+                    )
+                except SessionPersistenceError as exc:
+                    report_persistence_failure(exc)
+                    return False
+                updated.transcript = session.transcript
+                updated.model_context = session.model_context
+                session = updated
+                pending_metadata_changes.clear()
+            try:
+                self.store.save_runtime(session)
+            except SessionPersistenceError as exc:
+                report_persistence_failure(exc)
+                return False
+            if persistence_warning_active:
+                persistence_warning_active = False
+                external_callback(
+                    AgentEvent(
+                        kind="persistence_recovered",
+                        step=0,
+                        message="Session persistence recovered.",
+                        ok=True,
+                    )
+                )
+            return True
+
         response_language = self.language or session.preferred_language
         session.preferred_language = response_language
         workspace = Workspace(Path(session.workspace))
@@ -60,8 +117,17 @@ class SessionRuntime:
         if not model_message:
             raise ValueError("Message must not be empty")
 
+        metadata_changes = {"preferred_language": response_language}
         if not session.transcript:
-            session.title = title_from_message(message)
+            metadata_changes["title"] = title_from_message(message)
+        try:
+            session = self.store.update_metadata(session.id, **metadata_changes)
+        except SessionPersistenceError as exc:
+            session.preferred_language = response_language
+            if not session.transcript:
+                session.title = title_from_message(message)
+            pending_metadata_changes.update(metadata_changes)
+            report_persistence_failure(exc)
         session.transcript.append(
             {
                 "type": "user",
@@ -70,7 +136,7 @@ class SessionRuntime:
                 "timestamp": _timestamp(),
             }
         )
-        self.store.save(session)
+        persist_session()
 
         config = Config.from_sources(
             workspace=session.workspace,
@@ -108,13 +174,11 @@ class SessionRuntime:
             ],
             output_limit=config.tool_output_limit,
         )
-        external_callback = on_event or (lambda _: None)
-
         def record(event: AgentEvent) -> None:
             self._record_event(session, event)
             external_callback(event)
             if event.kind not in {"reasoning_delta", "content_delta", "step"}:
-                self.store.save(session)
+                persist_session()
 
         runner = AgentRunner(
             model=self.model_factory(config),
@@ -137,10 +201,11 @@ class SessionRuntime:
                     "timestamp": _timestamp(),
                 }
             )
-            raise
-        finally:
             session.model_context = context.to_dict()
-            self.store.save(session)
+            persist_session()
+            raise
+        session.model_context = context.to_dict()
+        persist_session()
         return result
 
     @staticmethod
@@ -188,7 +253,12 @@ class SessionRuntime:
                 session.transcript.append(
                     {"type": "assistant", "text": event.message, "timestamp": _timestamp()}
                 )
-        elif event.kind in {"verification", "stopped"}:
+        elif event.kind in {
+            "verification",
+            "stopped",
+            "persistence_warning",
+            "persistence_recovered",
+        }:
             session.transcript.append(
                 {
                     "type": "status",

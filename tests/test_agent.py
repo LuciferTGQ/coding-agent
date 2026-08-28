@@ -206,3 +206,73 @@ def test_verification_guard_reminds_once_when_verification_is_unavailable(
     assert result.status == "completed"
     assert not result.verification_observed
     assert result.steps == 3
+
+
+def test_custom_html_validation_satisfies_guard_for_latest_revision(tmp_path: Path) -> None:
+    model = FakeModel(
+        [
+            _response(
+                "",
+                (
+                    "w",
+                    "write_file",
+                    {"path": "index.html", "content": "<h1>Hello World</h1>"},
+                ),
+            ),
+            _response(
+                "",
+                (
+                    "v",
+                    "run_command",
+                    {
+                        "argv": [
+                            sys.executable,
+                            "-c",
+                            "from html.parser import HTMLParser; HTMLParser().feed(open('index.html').read())",
+                        ]
+                    },
+                ),
+            ),
+            _response("Changed and verified."),
+        ]
+    )
+    events = []
+    runner = _runner(tmp_path, model)
+    runner.on_event = events.append
+
+    result = runner.run()
+
+    assert result.status == "completed"
+    assert result.verification_observed
+    assert not any(event.kind == "verification" for event in events)
+
+
+def test_edit_after_verification_requires_latest_revision_check(tmp_path: Path) -> None:
+    model = FakeModel(
+        [
+            _response("", ("w", "write_file", {"path": "value.py", "content": "x = 1\n"})),
+            _response(
+                "",
+                ("v", "run_command", {"argv": [sys.executable, "value.py"]}),
+            ),
+            _response(
+                "",
+                (
+                    "e",
+                    "edit_file",
+                    {"path": "value.py", "old_text": "x = 1", "new_text": "x = 2"},
+                ),
+            ),
+            _response("Done after the second edit."),
+            _response("No further verification was available."),
+        ]
+    )
+    events = []
+    runner = _runner(tmp_path, model)
+    runner.on_event = events.append
+
+    result = runner.run()
+
+    assert result.status == "completed"
+    assert not result.verification_observed
+    assert [event.kind for event in events].count("verification") == 1

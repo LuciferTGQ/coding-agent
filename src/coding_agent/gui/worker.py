@@ -8,12 +8,13 @@ from PySide6.QtCore import QThread, Signal
 
 from coding_agent.agent import AgentEvent, AgentResult
 from coding_agent.session_runtime import SessionRuntime
+from coding_agent.sessions import SessionPersistenceError
 
 
 class AgentWorker(QThread):
     event_received = Signal(object)
     completed = Signal(object)
-    failed = Signal(str)
+    failed = Signal(str, str)
 
     def __init__(
         self,
@@ -43,7 +44,9 @@ class AgentWorker(QThread):
                 should_cancel=self._cancel.is_set,
                 stream=True,
             )
+        except SessionPersistenceError as exc:
+            self.failed.emit("persistence", f"{type(exc).__name__}: {exc}")
         except Exception as exc:
-            self.failed.emit(f"{type(exc).__name__}: {exc}")
+            self.failed.emit("agent", f"{type(exc).__name__}: {exc}")
         else:
             self.completed.emit(result)

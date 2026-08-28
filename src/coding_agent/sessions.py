@@ -7,12 +7,32 @@ from datetime import datetime, timezone
 import json
 import os
 from pathlib import Path
+from threading import Lock, RLock
+import time
 from typing import Any
 from uuid import uuid4
 
 
 JsonObject = dict[str, Any]
 SCHEMA_VERSION = 1
+DEFAULT_REPLACE_RETRY_DELAYS = (0.02, 0.05, 0.1)
+_LOCKS_GUARD = Lock()
+_SESSION_LOCKS: dict[str, RLock] = {}
+_RUNTIME_METADATA_FIELDS = (
+    "title",
+    "workspace",
+    "model",
+    "reasoning_effort",
+    "preferred_language",
+    "pinned",
+    "unread",
+    "created_at",
+)
+_EDITABLE_METADATA_FIELDS = frozenset(_RUNTIME_METADATA_FIELDS) - {"created_at"}
+
+
+class SessionPersistenceError(OSError):
+    """Raised when a complete session record cannot be read or committed."""
 
 
 def _now() -> str:
@@ -76,10 +96,16 @@ class Session:
 class SessionStore:
     """Atomic JSON CRUD for local desktop sessions; credentials are never accepted."""
 
-    def __init__(self, root: str | Path | None = None) -> None:
+    def __init__(
+        self,
+        root: str | Path | None = None,
+        *,
+        replace_retry_delays: tuple[float, ...] = DEFAULT_REPLACE_RETRY_DELAYS,
+    ) -> None:
         self.root = Path(root or Path.home() / ".nju-coding-agent").expanduser().resolve()
         self.sessions_dir = self.root / "sessions"
         self.sessions_dir.mkdir(parents=True, exist_ok=True)
+        self.replace_retry_delays = replace_retry_delays
 
     def create(
         self,
@@ -105,21 +131,53 @@ class SessionStore:
         return session
 
     def save(self, session: Session) -> None:
-        payload = session.to_dict()
-        if _contains_credential_field(payload):
-            raise ValueError("Credentials must not be stored in sessions")
-        session.updated_at = _now()
+        with _session_lock(self._path(session.id)):
+            self._save_locked(session)
+
+    def save_runtime(self, session: Session) -> None:
+        """Save transcript/context while preserving the latest GUI metadata."""
+
         target = self._path(session.id)
-        temporary = target.with_suffix(".json.tmp")
-        rendered = json.dumps(session.to_dict(), ensure_ascii=False, indent=2)
-        temporary.write_text(rendered + "\n", encoding="utf-8")
-        os.replace(temporary, target)
+        with _session_lock(target):
+            if target.exists():
+                current = self._load_locked(session.id)
+                for field_name in _RUNTIME_METADATA_FIELDS:
+                    setattr(session, field_name, getattr(current, field_name))
+            self._save_locked(session)
+
+    def update_metadata(self, session_id: str, **changes: Any) -> Session:
+        """Patch GUI-owned metadata without replacing transcript or model context."""
+
+        unknown = changes.keys() - _EDITABLE_METADATA_FIELDS
+        if unknown:
+            raise ValueError(f"Unsupported session metadata: {', '.join(sorted(unknown))}")
+        target = self._path(session_id)
+        with _session_lock(target):
+            session = self._load_locked(session_id)
+            for field_name, value in changes.items():
+                setattr(session, field_name, value)
+            if not isinstance(session.title, str) or not session.title.strip():
+                raise ValueError("Session title must not be empty")
+            session.title = session.title.strip()
+            if session.preferred_language not in {"zh", "en"}:
+                raise ValueError("Unsupported preferred language")
+            if not isinstance(session.pinned, bool) or not isinstance(session.unread, bool):
+                raise ValueError("Session flags must be boolean")
+            self._save_locked(session)
+            return session
 
     def load(self, session_id: str) -> Session:
+        target = self._path(session_id)
+        with _session_lock(target):
+            return self._load_locked(session_id)
+
+    def _load_locked(self, session_id: str) -> Session:
         try:
             payload = json.loads(self._path(session_id).read_text(encoding="utf-8"))
         except FileNotFoundError as exc:
             raise KeyError(f"Unknown session: {session_id}") from exc
+        except OSError as exc:
+            raise SessionPersistenceError(f"Could not read session {session_id}: {exc}") from exc
         if not isinstance(payload, dict):
             raise ValueError("Session file must contain a JSON object")
         return Session.from_dict(payload)
@@ -138,15 +196,51 @@ class SessionStore:
         )
 
     def delete(self, session_id: str) -> None:
-        try:
-            self._path(session_id).unlink()
-        except FileNotFoundError as exc:
-            raise KeyError(f"Unknown session: {session_id}") from exc
+        target = self._path(session_id)
+        with _session_lock(target):
+            try:
+                target.unlink()
+            except FileNotFoundError as exc:
+                raise KeyError(f"Unknown session: {session_id}") from exc
+            except OSError as exc:
+                raise SessionPersistenceError(
+                    f"Could not delete session {session_id}: {exc}"
+                ) from exc
 
     def _path(self, session_id: str) -> Path:
         if not session_id or any(character not in "0123456789abcdef" for character in session_id):
             raise ValueError("Invalid session id")
         return self.sessions_dir / f"{session_id}.json"
+
+    def _save_locked(self, session: Session) -> None:
+        session.updated_at = _now()
+        payload = session.to_dict()
+        if _contains_credential_field(payload):
+            raise ValueError("Credentials must not be stored in sessions")
+        target = self._path(session.id)
+        temporary = self.sessions_dir / f"{session.id}.{uuid4().hex}.json.tmp"
+        rendered = json.dumps(payload, ensure_ascii=False, indent=2) + "\n"
+        try:
+            temporary.write_text(rendered, encoding="utf-8")
+            for attempt in range(len(self.replace_retry_delays) + 1):
+                try:
+                    os.replace(temporary, target)
+                    return
+                except PermissionError as exc:
+                    if attempt >= len(self.replace_retry_delays):
+                        raise SessionPersistenceError(
+                            f"Could not commit session {session.id} after {attempt + 1} attempts: {exc}"
+                        ) from exc
+                    time.sleep(self.replace_retry_delays[attempt])
+        except SessionPersistenceError:
+            raise
+        except OSError as exc:
+            raise SessionPersistenceError(f"Could not save session {session.id}: {exc}") from exc
+        finally:
+            try:
+                temporary.unlink(missing_ok=True)
+            except OSError:
+                pass
 
 
 def title_from_message(message: str, limit: int = 48) -> str:
@@ -163,3 +257,9 @@ def _contains_credential_field(value: Any) -> bool:
     if isinstance(value, list):
         return any(_contains_credential_field(item) for item in value)
     return False
+
+
+def _session_lock(path: Path) -> RLock:
+    key = str(path.resolve()).casefold()
+    with _LOCKS_GUARD:
+        return _SESSION_LOCKS.setdefault(key, RLock())

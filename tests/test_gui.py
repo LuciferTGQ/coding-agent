@@ -6,12 +6,15 @@ from pathlib import Path
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtCore import Qt
-from PySide6.QtWidgets import QApplication
+from PySide6.QtTest import QTest
+from PySide6.QtWidgets import QApplication, QFileDialog
 
 from coding_agent.agent import AgentEvent
 import coding_agent.gui.app as gui_app
 from coding_agent.gui.app import MainWindow
 from coding_agent.gui.settings import AppSettings, SettingsStore
+from coding_agent.gui.sidebar import SessionRow
+from coding_agent.gui.widgets import MessageBubble
 from coding_agent.sessions import SessionStore
 
 
@@ -144,6 +147,100 @@ def test_opening_an_unread_session_marks_it_read(tmp_path: Path) -> None:
     window = MainWindow(store)
 
     assert store.load(session.id).unread is False
+    window.close()
+    app.processEvents()
+
+
+def test_session_row_hover_and_right_click_share_menu_entry_point(
+    tmp_path: Path, monkeypatch
+) -> None:
+    app = _app()
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    store = SessionStore(tmp_path / "hover-state")
+    store.create(workspace=workspace, title="Hover me")
+    store.create(workspace=workspace, title="Selected first")
+    window = MainWindow(store)
+    window.show()
+    app.processEvents()
+    item = window.session_list.item(1)
+    row = window.session_list.itemWidget(item)
+    assert isinstance(row, SessionRow)
+    assert row.menu_button.text() == ""
+    calls = []
+    monkeypatch.setattr(
+        window,
+        "_show_session_menu",
+        lambda session_id, position: calls.append((session_id, position)),
+    )
+
+    QTest.mouseMove(row, row.rect().center())
+    app.processEvents()
+    assert row._hovered is True
+    assert row.menu_button.isVisible()
+    assert row.menu_button.text() == "..."
+    assert row.property("hovered") is True
+
+    QTest.mouseClick(row, Qt.RightButton, pos=row.rect().center())
+    app.processEvents()
+    assert calls and calls[0][0] == item.data(Qt.UserRole)
+    window.close()
+    app.processEvents()
+
+
+def test_workspace_authorization_can_cancel_new_conversation(
+    tmp_path: Path, monkeypatch
+) -> None:
+    app = _app()
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    store = SessionStore(tmp_path / "authorization-state")
+    window = MainWindow(store)
+    monkeypatch.setattr(
+        QFileDialog,
+        "getExistingDirectory",
+        lambda *args, **kwargs: str(workspace),
+    )
+    monkeypatch.setattr(window, "_confirm_workspace_access", lambda _: False)
+
+    window.new_session()
+
+    assert store.list() == []
+    window.close()
+    app.processEvents()
+
+
+def test_long_user_and_markdown_messages_expand_without_inner_scroll(tmp_path: Path) -> None:
+    app = _app()
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    store = SessionStore(tmp_path / "long-message-state")
+    session = store.create(workspace=workspace)
+    session.transcript = [
+        {"type": "user", "text": "这是一段需要完整显示的中文消息。" * 80},
+        {
+            "type": "assistant",
+            "text": "## 完整结果\n\n" + "- 这是一条较长的 Markdown 说明。\n" * 80,
+        },
+    ]
+    store.save(session)
+    window = MainWindow(store)
+    window.resize(920, 700)
+    window.show()
+    window.load_session(session.id)
+    for _ in range(6):
+        app.processEvents()
+
+    bubbles = [
+        window.conversation.layout.itemAt(index).widget()
+        for index in range(window.conversation.layout.count())
+        if isinstance(window.conversation.layout.itemAt(index).widget(), MessageBubble)
+    ]
+    assert len(bubbles) == 2
+    for bubble in bubbles:
+        expected = bubble.body.heightForWidth(bubble.body.width())
+        assert bubble.body.height() >= expected
+        assert bubble.body.geometry().bottom() <= bubble.contentsRect().bottom()
     window.close()
     app.processEvents()
 

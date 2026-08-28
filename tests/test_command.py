@@ -5,7 +5,7 @@ import os
 from pathlib import Path
 import sys
 
-from coding_agent.tools.command import create_command_tool
+from coding_agent.tools.command import _looks_like_verification, create_command_tool
 from coding_agent.tools.registry import ToolRegistry
 from coding_agent.workspace import Workspace
 
@@ -23,6 +23,19 @@ def test_command_success_and_no_output(tmp_path: Path) -> None:
     assert result.ok
     assert result.data["exit_code"] == 0
     assert "produced no output" in result.message
+
+
+def test_html_and_javascript_syntax_checks_are_verification(tmp_path: Path) -> None:
+    html = _run(
+        tmp_path,
+        [sys.executable, "-c", "from html.parser import HTMLParser; HTMLParser()"],
+    )
+
+    assert html.ok and html.verification
+    assert _looks_like_verification(["node", "--check", "app.js"])
+    assert _looks_like_verification(
+        ["node", "-e", "const vm=require('vm'); new vm.Script('const value = 1')"]
+    )
 
 
 def test_command_failure_returns_stderr_and_exit_code(tmp_path: Path) -> None:
@@ -78,4 +91,3 @@ def test_output_is_truncated(tmp_path: Path) -> None:
     result = _run(tmp_path, [sys.executable, "-c", "print('x' * 10000)"])
     assert result.ok and result.truncated
     assert "output truncated" in result.message
-

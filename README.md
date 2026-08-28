@@ -78,7 +78,7 @@ coding-agent-gui
 
 也可以直接运行仓库根目录的 `start_gui.py` 启动桌面界面，例如 `python start_gui.py`。
 
-应用默认使用中文。点击 **新建对话** 选择项目目录，然后输入任务。左侧可按标题或 Workspace 搜索历史会话；每条会话的 `...` 菜单提供重命名、置顶、未读标记、打开工作区和删除操作。每个会话固定绑定一个 Workspace；已有对话切换 Workspace 时，应用会提示并创建新会话，防止不同项目的上下文混合。
+应用默认使用中文。点击 **新建对话** 选择项目目录，确认文件与命令执行授权后输入任务。左侧可按标题或 Workspace 搜索历史会话；每条会话的 `...` 菜单和右键菜单提供重命名、置顶、未读标记、打开工作区和删除操作。每个会话固定绑定一个 Workspace；已有对话切换 Workspace 时，应用会提示并创建新会话，防止不同项目的上下文混合。
 
 模型输出会逐步显示。思考过程默认折叠，read/search/edit/run 等调用显示为工具卡片，参数、diff 和命令输出可按需展开。点击 **停止** 后，Agent 会在下一步骤边界或完整 tool-call 组执行完毕后停止，不会强制终止正在写文件的 handler。
 
@@ -89,6 +89,8 @@ coding-agent-gui
 附件仅支持 UTF-8 文本。Workspace 内文件只把相对路径加入任务，不把全文直接塞进提示；Workspace 外文件必须经用户确认后复制到 `.agent-attachments/`，仍由原有路径边界和工具读取规则管理。
 
 桌面会话以 JSON 保存在用户目录 `~/.nju-coding-agent/sessions/`，应用默认设置保存在同级 `settings.json`；它们都不写入仓库或目标 Workspace，也不包含 API Key。
+
+Session 写入使用进程内 per-session lock、唯一临时文件和有限的 Windows `PermissionError` 重试。短暂持久化失败会作为独立状态显示，Agent 会继续运行并在后续事件中重试；它不会把已经执行成功的 Workspace 操作误报为 Agent 核心失败。多个 GUI 进程同时写同一 Session 仍不提供跨进程一致性保证。
 
 ## CLI 使用
 

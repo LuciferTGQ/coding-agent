@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from PySide6.QtCore import Qt, QTimer
-from PySide6.QtGui import QFont, QTextCursor
+from PySide6.QtGui import QFont, QResizeEvent, QTextCursor
 from PySide6.QtWidgets import (
     QFrame,
     QLabel,
@@ -22,8 +22,8 @@ class MessageBubble(QFrame):
     def __init__(self, role: str, text: str = "", language: str = "zh") -> None:
         super().__init__()
         self.setObjectName("userBubble" if role == "user" else "assistantBubble")
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(14, 10, 14, 10)
+        self._layout = QVBoxLayout(self)
+        self._layout.setContentsMargins(14, 10, 14, 10)
         heading = QLabel(tr(language, "you") if role == "user" else tr(language, "agent"))
         heading.setObjectName("bubbleHeading")
         self.body = QLabel(text)
@@ -31,8 +31,8 @@ class MessageBubble(QFrame):
         self.body.setTextInteractionFlags(Qt.TextSelectableByMouse)
         self.body.setTextFormat(Qt.PlainText if role == "user" else Qt.MarkdownText)
         self.body.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Minimum)
-        layout.addWidget(heading)
-        layout.addWidget(self.body)
+        self._layout.addWidget(heading)
+        self._layout.addWidget(self.body)
         self.setMaximumWidth(860)
         if role != "user":
             self.setMinimumWidth(520)
@@ -48,9 +48,23 @@ class MessageBubble(QFrame):
         self._sync_height()
 
     def _sync_height(self) -> None:
+        width = self.body.width()
+        if width < 40:
+            width = 820 if self.objectName() == "assistantBubble" else 520
+        wrapped_height = self.body.heightForWidth(width)
+        content_height = max(
+            self.body.sizeHint().height(),
+            wrapped_height if wrapped_height > 0 else 0,
+        )
+        self.body.setFixedHeight(content_height)
         self.body.updateGeometry()
+        self._layout.activate()
         self.updateGeometry()
         self.setMinimumHeight(max(54, self.sizeHint().height()))
+
+    def resizeEvent(self, event: QResizeEvent) -> None:
+        super().resizeEvent(event)
+        QTimer.singleShot(0, self._sync_height)
 
 
 class CollapsibleCard(QFrame):
@@ -199,6 +213,10 @@ class ConversationView(QScrollArea):
             text = tr(self.language, "verification_status")
         elif kind == "stopped":
             text = tr(self.language, "stopped_status")
+        elif kind == "persistence_warning":
+            text = tr(self.language, "persistence_warning_status")
+        elif kind == "persistence_recovered":
+            text = tr(self.language, "persistence_recovered_status")
         self.add_status(text, ok)
 
     def render(self, transcript: list[dict]) -> None:

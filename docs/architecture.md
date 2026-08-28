@@ -115,11 +115,15 @@ system prompt 是 stable context。每个用户请求开启一个 turn；期间�
 
 ### SessionStore 与桌面层
 
-`SessionStore` 在 `~/.nju-coding-agent/sessions/` 中以单会话 JSON 文件保存 id、标题、Workspace、模型、reasoning effort、UTC 时间、置顶/未读 metadata、完整 UI transcript 和序列化的模型上下文。新增 metadata 仍使用 schema v1 的可选默认字段，因此旧 Session 无需迁移即可加载。置顶会话和普通会话分别按 `updated_at` 倒序排列。写入先落到临时文件，再用原子 replace 提交；API Key 不属于 Session 数据结构。
+`SessionStore` 在 `~/.nju-coding-agent/sessions/` 中以单会话 JSON 文件保存 id、标题、Workspace、模型、reasoning effort、UTC 时间、置顶/未读 metadata、完整 UI transcript 和序列化的模型上下文。新增 metadata 仍使用 schema v1 的可选默认字段，因此旧 Session 无需迁移即可加载。置顶会话和普通会话分别按 `updated_at` 倒序排列。写入使用进程内 per-session lock，为每次保存创建唯一临时文件，再用原子 replace 提交；Windows 短暂拒绝 replace 时进行有限退避重试，并在失败后清理临时文件。API Key 不属于 Session 数据结构。
+
+Worker 使用 `save_runtime()` 写 transcript/model context，并合并磁盘上较新的 GUI metadata；重命名、置顶和未读则通过 `update_metadata()` 做锁内 patch，避免两个 stale Session 对象互相覆盖。非关键 event 的持久化失败不会中断 Tool 执行：GUI 显示独立 warning，后续 event 和 turn 结束时继续尝试完整保存。该机制提供同一进程的线程安全，不提供多个 GUI 进程同时写同一 Session 的跨进程事务保证。
 
 GUI 文案由一个集中维护的 `zh/en` 映射提供，不使用额外 locale framework。`settings.json` 只保存语言、默认模型、默认 reasoning effort 和默认最大步骤；保存语言变更后可稍后生效，也可用 `QProcess.startDetached` 启动新 GUI 进程并正常关闭当前窗口。界面语言也会更新同一个 `ContextManager` 的 stable system prompt，只约束用户可见交流语言，不改变 Tool 名称、JSON Schema 或 provider message 协议。
 
 侧边栏搜索仅过滤 Session 标题和 Workspace 路径，不读取 transcript。置顶、未读属于持久 Session metadata；执行中的点动画只属于当前窗口状态，不写入 transcript、模型上下文或 Tool 协议。重命名、打开目录和删除 Session 都不会修改 Workspace 文件。
+
+新建 Conversation 或切换到新 Workspace 时，GUI 会展示完整路径并请求一次文件修改与本地命令授权。该提示描述的是应用能力边界，不把 Workspace 路径约束表述为 OS-level sandbox。
 
 完整 transcript 和 provider context 是两份目的不同的数据：前者保留 reasoning、工具状态、diff、命令输出和最终回答，供 UI 恢复；后者由 `ContextManager` 按预算裁剪，只保留协议正确、足够继续推理的消息。销毁窗口并重新加载 Session 后，新用户消息会追加到恢复的 Context，而不是重新开始单轮任务。
 
@@ -133,6 +137,8 @@ Qt 主线程只处理窗口和控件。`AgentWorker` 在 `QThread` 中运行 `Se
 test/build/lint/program 的成功 `run_command` 才把它标记为已验证。若模型此时直接 final，Harness
 保存该 assistant 回答并追加一次反馈，要求执行合适验证。相同 revision 只提醒一次；如果没有
 合理自动验证，下一次 final 可说明原因后结束。
+
+轻量命令分类覆盖常见测试、构建与 lint，也识别明确的 `node --check`、基于 `vm.Script` 的 Node 内联语法检查，以及使用 `html.parser`/`ast.parse`/`compile` 的 Python 内联校验。它仍是启发式策略：成功的普通命令不会自动算作验证，识别出的验证也不等于形式化正确性证明。
 
 它防止“写完即自信成功”，但不是正确性的形式化证明：命令可能覆盖不全，测试也可能有缺陷；
 失败验证后模型仍可如实报告未解决问题。
