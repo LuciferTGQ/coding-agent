@@ -177,7 +177,6 @@ Aider 的 Repo Map 用语法树和依赖图在大仓库中选择重要符号。�
 - Boundary and execution：`../`/absolute/symlink escape、Secret 拒绝、invalid JSON/参数、exact edit 三种结果、命令
   success/non-zero/timeout、完整块裁剪、Verification Guard、max steps；
 - Integration：FakeModel + real AgentRunner + real Registry/Workspace 完成 read/edit/execute/final；
-- Demo integration：复制真实多文件小项目，证明初始失败，再通过 Harness 修复并验证；
 - Live protocol：显式脚本验证 thinking/tool/result/next request；
 - Live E2E：自然语言任务驱动真实 DeepSeek 完成探索、失败、修改和再次测试。
 

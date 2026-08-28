@@ -9,4 +9,4 @@ Agent 可自主浏览、搜索、分段读取、精确修改和运行测试，�
 
 Verification Guard 在修改后要求执行验证。Workspace 限制文件路径和命令 cwd；子进程过滤常见密钥变量，命令采用 shell=False、超时和输出截断。这些是基础防护，不是真正 Sandbox。
 
-离线测试运行 python -m pytest；真实流式协议验证需设置 RUN_LIVE_TESTS=1 后运行 python scripts/live_smoke.py。Demo 先运行 python scripts/prepare_demo.py，再让桌面端或 CLI 修复 .demo-workspace 中的失败测试。
+离线测试运行 python -m pytest；真实流式协议验证需设置 RUN_LIVE_TESTS=1 后运行 python scripts/live_smoke.py。

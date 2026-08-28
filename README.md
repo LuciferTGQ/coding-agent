@@ -150,16 +150,6 @@ python scripts/live_smoke.py
 
 该脚本验证 streaming thinking、tool call、本地 tool result 与下一轮 final response，不输出 reasoning 原文或 API 凭据。
 
-## 可重复 Demo
-
-```powershell
-python scripts/prepare_demo.py
-python -m coding_agent --workspace .demo-workspace --max-steps 20 `
-  "Inspect this project, identify why its tests fail, fix the bug without weakening the tests, and verify the result."
-```
-
-`prepare_demo.py` 会从 `examples/buggy_project` 重建一份独立的 `.demo-workspace`。演示项目初始有 3 个失败测试；Agent 需要自行浏览源码、复现失败、定位缺陷、编辑并重新运行测试。再次执行准备脚本即可恢复初始状态。详细步骤见 [Demo 文档](docs/demo.md)。
-
 ## 设计参考
 
 - [DeepSeek Thinking Mode](https://api-docs.deepseek.com/guides/thinking_mode/)
