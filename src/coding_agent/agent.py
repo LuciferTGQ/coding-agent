@@ -6,7 +6,7 @@ from dataclasses import dataclass
 import json
 from typing import Any, Callable
 
-from coding_agent.context import ContextManager
+from coding_agent.context import ContextManager, SummaryCallback
 from coding_agent.llm import ModelClient, ModelError, ModelStreamEvent
 from coding_agent.tools.registry import ToolRegistry
 
@@ -46,6 +46,7 @@ class AgentRunner:
         on_event: Callable[[AgentEvent], None] | None = None,
         stream: bool = False,
         should_cancel: Callable[[], bool] | None = None,
+        summarizer: SummaryCallback | None = None,
     ) -> None:
         self.model = model
         self.tools = tools
@@ -55,6 +56,7 @@ class AgentRunner:
         self.on_event = on_event or (lambda _: None)
         self.stream = stream
         self.should_cancel = should_cancel or (lambda: False)
+        self.summarizer = summarizer
         self._current_step = 0
 
     def run(self, task: str | None = None) -> AgentResult:
@@ -73,6 +75,7 @@ class AgentRunner:
             self._current_step = step
             if self.should_cancel():
                 return self._cancelled(step - 1, workspace_changed, verification_observed)
+            self.context.compact(self.summarizer)
             self._emit("step", step, f"Agent step {step}/{self.max_steps}")
             try:
                 if self.stream and hasattr(self.model, "complete_stream"):

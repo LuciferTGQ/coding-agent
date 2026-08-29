@@ -7,6 +7,7 @@ import sys
 from concurrent.futures import ThreadPoolExecutor
 from typing import Sequence
 
+from coding_agent.context import ContextManager
 from coding_agent.llm import AssistantResponse
 from coding_agent.llm import ModelError
 from coding_agent.llm import ToolCall
@@ -402,3 +403,107 @@ def test_parallel_session_runtimes_keep_contexts_isolated(tmp_path: Path) -> Non
     assert model_b.requests[0][1]["content"] == "Only B"
     assert "Only B" not in str(loaded_a.model_context)
     assert "Only A" not in str(loaded_b.model_context)
+
+
+def _completed_context_for_summary() -> ContextManager:
+    context = ContextManager(
+        system_prompt="system",
+        soft_budget_chars=1,
+        recent_completed_turns=1,
+        tool_result_compression_chars=10_000,
+    )
+    for number in range(3):
+        context.start_turn(f"historical task {number}")
+        context.finish_turn(
+            {"role": "assistant", "content": f"historical answer {number}"}
+        )
+    return context
+
+
+def test_runtime_persists_summary_without_changing_full_transcript(tmp_path: Path) -> None:
+    class SummaryThenMainModel:
+        def __init__(self) -> None:
+            self.requests = []
+
+        def complete(self, *, messages: Sequence[dict], tools: Sequence[dict]) -> AssistantResponse:
+            self.requests.append((list(messages), list(tools)))
+            content = (
+                "## Goal\nPersist working memory"
+                if not tools
+                else "Continued with restored recent context."
+            )
+            return AssistantResponse(
+                content=content,
+                tool_calls=(),
+                provider_message={"role": "assistant", "content": content},
+            )
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    store = SessionStore(tmp_path / "summary-state")
+    session = store.create(workspace=workspace)
+    session.model_context = _completed_context_for_summary().to_dict()
+    original_transcript = [
+        {"type": "user", "text": "visible old request"},
+        {"type": "assistant", "text": "visible old answer"},
+    ]
+    session.transcript = list(original_transcript)
+    store.save(session)
+    model = SummaryThenMainModel()
+
+    result = SessionRuntime(store, model_factory=lambda _: model).run_turn(
+        session.id, "continue", stream=False
+    )
+
+    loaded = store.load(session.id)
+    restored = ContextManager.from_dict(loaded.model_context)
+    assert result.status == "completed"
+    assert model.requests[0][1] == []
+    assert model.requests[1][1]
+    assert restored.summary == "## Goal\nPersist working memory"
+    assert restored.compaction_count == 1
+    assert loaded.transcript[:2] == original_transcript
+    assert loaded.transcript[-1]["text"] == "Continued with restored recent context."
+
+    restarted = ContextManager.from_dict(SessionStore(store.root).load(session.id).model_context)
+    assert restarted.summary == restored.summary
+    assert restarted.compaction_count == 1
+
+
+def test_summary_provider_failure_does_not_abort_main_turn_or_replace_context(
+    tmp_path: Path,
+) -> None:
+    class FailingSummaryModel:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def complete(self, *, messages: Sequence[dict], tools: Sequence[dict]) -> AssistantResponse:
+            self.calls += 1
+            if not tools:
+                raise ModelError("summary timeout")
+            return AssistantResponse(
+                content="Main task still completed.",
+                tool_calls=(),
+                provider_message={"role": "assistant", "content": "Main task still completed."},
+            )
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    store = SessionStore(tmp_path / "summary-failure-state")
+    session = store.create(workspace=workspace)
+    original = _completed_context_for_summary()
+    session.model_context = original.to_dict()
+    store.save(session)
+    model = FailingSummaryModel()
+
+    result = SessionRuntime(store, model_factory=lambda _: model).run_turn(
+        session.id, "continue despite summary failure", stream=False
+    )
+
+    restored = ContextManager.from_dict(store.load(session.id).model_context)
+    assert result.status == "completed"
+    assert result.final_answer == "Main task still completed."
+    assert model.calls == 2
+    assert restored.summary is None
+    assert restored.summary_failures == 1
+    assert "historical task 0" in str(restored.messages())

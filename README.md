@@ -12,7 +12,7 @@ NJU Coding Agent 是一个轻量、自实现 Harness 的本地 Coding Agent。�
 - 流式展示回答、可折叠 reasoning 和带状态的工具卡片；模型与工具运行在后台线程。
 - 通过六个受限工具浏览、搜索、读取、写入、精确编辑文件并执行命令。
 - 将 stdout、stderr、退出码和超时信息回传给模型，让失败成为下一步决策的输入。
-- 按完整的 assistant-tool 交互块管理上下文，避免裁剪后出现残缺的 Tool Calling 协议。
+- 长会话使用旧只读 Tool Result 压缩、Rolling Structured Summary 和 Recent Raw Context，同时保持 Tool Calling 协议完整。
 - Verification Guard 在文件变更后要求一次有意义的执行验证，减少“修改完就结束”的情况。
 - Workspace 边界、凭据隔离、命令超时和输出限额为本地执行提供基础防护。
 
@@ -125,7 +125,11 @@ python -m coding_agent --workspace .\path\to\project --max-steps 20 `
 
 ## Context 与 Verification Guard
 
-`ContextManager` 始终保留 system prompt。每个用户请求、期间的 assistant/tool 交互及最终回答形成一轮；assistant tool call 与对应的全部 tool results 仍是不可拆分的 interaction block。超过软预算时，系统优先删除最旧的完整用户轮次；单轮过长时才删除其中最旧的完整工具块。这样不会留下孤立的 tool message，DeepSeek thinking 模式所需的 provider fields 也会随块完整保留。
+`ContextManager` 始终保留 system prompt。每个用户请求、期间的 assistant/tool 交互及最终回答形成一轮；assistant tool call 与对应的全部 tool results 是不可拆分的 interaction block。近似字符大小超过软预算后，系统先把较早且较大的 `list_files`、`read_file`、`search_text` 结果替换为带 tool name、call id、状态和原始长度的短占位，但保留 assistant call、全部 tool result 和 DeepSeek provider fields。
+
+如果免费压缩后仍超出预算，Main 使用当前 Session 的同一个模型发起一次不带 Tools 的结构化摘要请求，将已有 working memory 与新近变老的完整 turns 滚动合并。摘要成功后才原子移除这些 turns；失败时保留原 Context 并继续正常任务。最近两个 completed turns 与 current active turn 始终保留原文，极端情况下宁可暂时超过 soft budget，也不拆坏协议块。Summary 随 `model_context` 保存和恢复，不影响完整 UI transcript。
+
+Working memory 是有损历史，不是代码事实源。模型必须以当前 Workspace 和新 Tool Result 为准；实现细节可能变化时应重新 read、search 或 verify。
 
 桌面 transcript 不受模型上下文预算影响，因此 UI 可以保留完整历史，而传给模型的上下文仍保持有界。DeepSeek 的 streaming chunks 会规范化为 `reasoning_delta` 与 `content_delta`，再聚合成与非流式路径相同的 `AssistantResponse`；thinking + tools 所需的 `reasoning_content` 会在后续请求中原样重放。
 
@@ -171,7 +175,7 @@ python scripts/live_smoke.py
 ## 已知限制
 
 - 目前只实现 DeepSeek Chat Completions provider，桌面模型列表只提供已按该协议验证的 `deepseek-v4-flash`。
-- Context soft budget 使用字符数近似 token 数，不做模型摘要。
+- Context soft budget 是序列化消息的近似字符预算，并非精确 token 计数；Rolling Summary 仍可能遗漏次要历史细节。
 - 当前没有 Repo Map、RAG、LSP 或协作式多 Agent 编排；并行能力是多个彼此独立的单 Agent Session。
 - Stop 是协作式边界停止，不会中断正在进行的网络请求或单个工具 handler。
 - 同一 Workspace 并发不保证修改隔离和一致性。Git Worktree 可作为未来的每任务独立副本方案，但当前版本不会自动创建。

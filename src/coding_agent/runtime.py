@@ -6,6 +6,7 @@ from coding_agent.agent import AgentEvent, AgentRunError, AgentRunner
 from coding_agent.config import Config
 from coding_agent.context import ContextManager
 from coding_agent.llm import DeepSeekChatClient
+from coding_agent.memory import ModelContextSummarizer
 from coding_agent.prompts import build_system_prompt
 from coding_agent.tools import ToolRegistry, create_command_tool, create_file_tools
 from coding_agent.workspace import Workspace
@@ -40,7 +41,7 @@ def run_task(*, config: Config, task: str, verbose: bool = False) -> int:
     context = ContextManager(
         system_prompt=build_system_prompt(workspace.root),
         original_task=task,
-        soft_budget=config.context_soft_budget,
+        soft_budget_chars=config.context_soft_budget_chars,
     )
     reporter = ConsoleReporter(verbose=verbose)
     runner = AgentRunner(
@@ -49,6 +50,7 @@ def run_task(*, config: Config, task: str, verbose: bool = False) -> int:
         context=context,
         max_steps=config.max_steps,
         on_event=reporter,
+        summarizer=ModelContextSummarizer(model),
     )
     try:
         result = runner.run()

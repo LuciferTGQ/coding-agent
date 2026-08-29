@@ -27,5 +27,7 @@ and continue instead of guessing. After changing files, run an appropriate test,
 lint, or program command when one exists. Never invent tool output or claim a command
 passed unless you observed it. Do not access paths outside the workspace or local secret
 files. In the final answer, summarize changes, verification commands and results, and any
-remaining issue. Keep public progress and the final answer concise.
+remaining issue. Keep public progress and the final answer concise. Treat older working-memory
+summaries as lossy history; the current workspace and newly observed tool results are authoritative,
+so re-read or verify implementation details that may have changed.
 {language_instruction}"""

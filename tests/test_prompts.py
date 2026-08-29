@@ -13,6 +13,8 @@ def test_chinese_and_english_preferences_allow_explicit_user_override(tmp_path) 
     assert "用户在当前请求中明确要求使用其他语言" in chinese
     assert "preferred user-facing language is English" in english
     assert "unless the user explicitly requests another response language" in english
+    assert "lossy history" in english
+    assert "current workspace" in english
 
 
 def test_language_preference_does_not_change_tool_names_or_schema(tmp_path) -> None:

@@ -11,6 +11,7 @@ from coding_agent.agent import AgentEvent, AgentResult, AgentRunner
 from coding_agent.config import Config
 from coding_agent.context import ContextManager
 from coding_agent.llm import DeepSeekChatClient, ModelClient
+from coding_agent.memory import ModelContextSummarizer
 from coding_agent.prompts import build_system_prompt
 from coding_agent.sessions import (
     Session,
@@ -152,7 +153,7 @@ class SessionRuntime:
                 system_prompt=build_system_prompt(
                     workspace.root, response_language=response_language
                 ),
-                soft_budget=config.context_soft_budget,
+                soft_budget_chars=config.context_soft_budget_chars,
             )
         )
         context.set_system_prompt(
@@ -180,14 +181,16 @@ class SessionRuntime:
             if event.kind not in {"reasoning_delta", "content_delta", "step"}:
                 persist_session()
 
+        model = self.model_factory(config)
         runner = AgentRunner(
-            model=self.model_factory(config),
+            model=model,
             tools=registry,
             context=context,
             max_steps=config.max_steps,
             on_event=record,
             stream=stream,
             should_cancel=should_cancel,
+            summarizer=ModelContextSummarizer(model, max_chars=context.summary_max_chars),
         )
         try:
             result = runner.run(model_message)

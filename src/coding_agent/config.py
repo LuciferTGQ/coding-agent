@@ -38,7 +38,7 @@ class Config:
     max_steps: int = 24
     command_timeout: int = 60
     tool_output_limit: int = 12_000
-    context_soft_budget: int = 120_000
+    context_soft_budget_chars: int = 120_000
     max_read_lines: int = 200
     max_write_chars: int = 200_000
     max_search_results: int = 100
@@ -90,7 +90,7 @@ class Config:
             tool_output_limit=_positive_int(
                 "tool output limit", os.environ.get("CODING_AGENT_TOOL_OUTPUT_LIMIT", "12000")
             ),
-            context_soft_budget=_positive_int(
+            context_soft_budget_chars=_positive_int(
                 "context soft budget", os.environ.get("CODING_AGENT_CONTEXT_BUDGET", "120000")
             ),
         )

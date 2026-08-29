@@ -105,13 +105,19 @@ max_steps → controlled stop
 
 ### ContextManager
 
-system prompt 是 stable context。每个用户请求开启一个 turn；期间每个 assistant tool-call message 加其全部 tool results 组成一个 interaction block，最终 assistant message关闭该 turn。裁剪时优先整体删除最旧的完整 turn；当前 turn 单独过长时，才整体删除较旧 interaction block。这条不变量同时保证：
+system prompt 是 stable context。每个用户请求开启一个 turn；期间每个 assistant tool-call message 加其全部 tool results 组成一个 interaction block，最终 assistant message 关闭该 turn。Context 使用序列化 JSON 的字符长度作为近似 soft budget，而不是 token 数；字段名明确标记为 `*_chars`，不引入 tokenizer 依赖。
+
+超过预算时分两级处理。第一层只处理已变老 completed turns 中超过统一阈值的 `list_files`、`read_file`、`search_text` 结果，把正文换成包含 tool name、call id、原始字符数和状态的短占位；最近 completed turns 和 active turn 不处理。第二层把仍然过大的旧 completed turns 交给 `ModelContextSummarizer`。它复用 Main 本轮已创建的同一个 `ModelClient`，发送独立 system/user messages 且 `tools=[]`，只生成 Goal、Constraints、Decisions、Completed Work、Files、Verification、Findings 和 Remaining Work 等结构化 working memory。
+
+摘要提交采用 copy-then-commit：模型返回非空且未超过上限后，才更新 summary 并整体移除输入 turns；provider error、timeout、rate limit 或异常输出只增加失败统计，不改变原 turns，也不终止 Main。相同候选集失败后不会在每个 Agent step 重复请求；有新的 turn 变老或 Session 重启后可以重试。下一次压缩仅输入 previous summary 和之后新近变老的 turns，因此是 rolling 更新，不会重新发送第一轮以来的完整 transcript。
+
+实际 messages 由 stable system prompt（附带 working memory）、最近两个完整 completed turns 和 current active turn 组成。极端情况下如果没有更多安全候选，Context 可以暂时超过 soft budget，但不会拆 active turn 或协议块。这条不变量同时保证：
 
 - 不留下孤立 `role=tool`；
 - 不留下缺少执行结果的 assistant tool call；
 - 保留下来的 DeepSeek provider fields 结构完整。
 
-当前实现使用字符数 soft budget，而非精确 tokenizer；它没有调用模型生成摘要。对于小型和中型仓库，确定性的 turn/block pruning 足够稳定，并且避免了摘要失真和额外的模型调用。
+Summary 与 Context compaction 统计进入 `model_context` version 2；`from_dict()` 仍接受 version 1 的 `soft_budget` 和 turns。Summary 是有损 working memory，system policy 明确要求以当前 Workspace 和最新 Tool Result 为事实依据，存在不确定性时重新观察。
 
 ### SessionStore 与桌面层
 
@@ -125,7 +131,7 @@ GUI 文案由一个集中维护的 `zh/en` 映射提供，不使用额外 locale
 
 新建 Conversation 或切换到新 Workspace 时，GUI 会展示完整路径并请求一次文件修改与本地命令授权。该提示描述的是应用能力边界，不把 Workspace 路径约束表述为 OS-level sandbox。
 
-完整 transcript 和 provider context 是两份目的不同的数据：前者保留 reasoning、工具状态、diff、命令输出和最终回答，供 UI 恢复；后者由 `ContextManager` 按预算裁剪，只保留协议正确、足够继续推理的消息。销毁窗口并重新加载 Session 后，新用户消息会追加到恢复的 Context，而不是重新开始单轮任务。
+完整 transcript 和 provider context 是两份目的不同的数据：前者保留 reasoning、工具状态、diff、命令输出和最终回答，供 UI 恢复；后者由 `ContextManager` 保存 rolling summary 与协议完整的 recent raw context。销毁窗口并重新加载 Session 后会直接恢复已有 summary，不为同一批旧 turns 再次调用摘要模型；新用户消息继续追加到恢复的 Context。
 
 每个 Session 固定绑定一个 Workspace。已有历史时切换目录会创建新 Session，从结构上避免项目 A 的工具结果进入项目 B 的模型上下文。附件不会绕过这条边界：内部文件只记录相对路径；外部文件必须经确认复制进 Workspace，随后仍通过 `Workspace.resolve_path()` 和文件工具读取。
 
@@ -199,7 +205,7 @@ Aider 的 Repo Map 用语法树和依赖图在大仓库中选择重要符号。�
 ## 7. 未来升级方向
 
 - 容器或 VM Sandbox、网络隔离、资源 quota 与细粒度权限；
-- token-aware context、model-assisted compaction、语义摘要和 retrieval cache；
+- 可选的 token-aware budget 校准、摘要质量评估和 retrieval cache；
 - Aider 风格 Repo Map、LSP、AST/patch 编辑；
 - 更细粒度的 trajectory replay、会话导入导出与系统化 evaluation suite；
 - Responses API 和更多 provider adapter；
