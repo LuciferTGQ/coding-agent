@@ -217,6 +217,117 @@ def test_pure_delegation_batches_really_overlap_and_preserve_call_order(
     ]
 
 
+def test_finished_child_emits_result_while_slow_sibling_is_running(
+    tmp_path: Path,
+) -> None:
+    slow_started = Event()
+    fast_started = Event()
+    release_slow = Event()
+    fast_result_emitted = Event()
+    event_lock = Lock()
+    events = []
+
+    def delegate(task: str) -> ToolResult:
+        if task == "slow":
+            slow_started.set()
+            assert release_slow.wait(5)
+        else:
+            fast_started.set()
+        return ToolResult.success(f"findings {task}")
+
+    def on_event(event) -> None:
+        with event_lock:
+            events.append(event)
+        if event.kind == "tool_result" and event.call_id == "fast":
+            fast_result_emitted.set()
+
+    calls = (
+        ("slow", "delegate_task", {"task": "slow"}),
+        ("fast", "delegate_task", {"task": "fast"}),
+    )
+    model = ScriptedModel([_response("", *calls), _response("combined")])
+    runner = AgentRunner(
+        model=model,
+        tools=ToolRegistry([_task_tool(delegate)]),
+        context=ContextManager(system_prompt="system", original_task="investigate"),
+        on_event=on_event,
+        parallel_tool_names=frozenset({"delegate_task"}),
+    )
+
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        future = pool.submit(runner.run)
+        assert slow_started.wait(5)
+        assert fast_started.wait(5)
+        assert fast_result_emitted.wait(5)
+        with event_lock:
+            completed_call_ids = [
+                event.call_id for event in events if event.kind == "tool_result"
+            ]
+        assert completed_call_ids == ["fast"]
+        assert len(model.requests) == 1
+        assert not future.done()
+        release_slow.set()
+        assert future.result().status == "completed"
+
+    tool_messages = [
+        message for message in model.requests[1][0] if message["role"] == "tool"
+    ]
+    assert [message["tool_call_id"] for message in tool_messages] == ["slow", "fast"]
+
+
+def test_three_child_events_follow_completion_but_context_keeps_call_order(
+    tmp_path: Path,
+) -> None:
+    all_started = Event()
+    releases = {call_id: Event() for call_id in ("a", "b", "c")}
+    result_events = {call_id: Event() for call_id in releases}
+    event_order = []
+    lock = Lock()
+    started = 0
+
+    def delegate(task: str) -> ToolResult:
+        nonlocal started
+        with lock:
+            started += 1
+            if started == 3:
+                all_started.set()
+        assert releases[task].wait(5)
+        return ToolResult.success(f"findings {task}")
+
+    def on_event(event) -> None:
+        if event.kind != "tool_result":
+            return
+        with lock:
+            event_order.append(event.call_id)
+        result_events[event.call_id].set()
+
+    calls = tuple(
+        (call_id, "delegate_task", {"task": call_id}) for call_id in ("a", "b", "c")
+    )
+    model = ScriptedModel([_response("", *calls), _response("combined")])
+    runner = AgentRunner(
+        model=model,
+        tools=ToolRegistry([_task_tool(delegate)]),
+        context=ContextManager(system_prompt="system", original_task="investigate"),
+        on_event=on_event,
+        parallel_tool_names=frozenset({"delegate_task"}),
+    )
+
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        future = pool.submit(runner.run)
+        assert all_started.wait(5)
+        for call_id in ("c", "a", "b"):
+            releases[call_id].set()
+            assert result_events[call_id].wait(5)
+        assert future.result().status == "completed"
+
+    assert event_order == ["c", "a", "b"]
+    tool_messages = [
+        message for message in model.requests[1][0] if message["role"] == "tool"
+    ]
+    assert [message["tool_call_id"] for message in tool_messages] == ["a", "b", "c"]
+
+
 def test_parallel_delegation_never_exceeds_four_workers(tmp_path: Path) -> None:
     started = 0
     active = 0
@@ -264,11 +375,15 @@ def test_parallel_delegation_never_exceeds_four_workers(tmp_path: Path) -> None:
     assert maximum_active == 4
 
 
-def test_one_child_failure_keeps_sibling_results(tmp_path: Path) -> None:
+def test_early_child_failure_emits_immediately_and_keeps_sibling_results(
+    tmp_path: Path,
+) -> None:
     all_started = Event()
-    release = Event()
+    release_siblings = Event()
+    failure_emitted = Event()
     lock = Lock()
     started = 0
+    result_call_ids = []
 
     def delegate(task: str) -> ToolResult:
         nonlocal started
@@ -276,12 +391,19 @@ def test_one_child_failure_keeps_sibling_results(tmp_path: Path) -> None:
             started += 1
             if started == 3:
                 all_started.set()
-        assert release.wait(2)
-        return (
-            ToolResult.failure("child failed")
-            if task == "fail"
-            else ToolResult.success(f"success {task}")
-        )
+        assert all_started.wait(5)
+        if task == "fail":
+            return ToolResult.failure("child failed")
+        assert release_siblings.wait(5)
+        return ToolResult.success(f"success {task}")
+
+    def on_event(event) -> None:
+        if event.kind != "tool_result":
+            return
+        with lock:
+            result_call_ids.append(event.call_id)
+        if event.call_id == "b":
+            failure_emitted.set()
 
     calls = (
         ("a", "delegate_task", {"task": "one"}),
@@ -293,13 +415,18 @@ def test_one_child_failure_keeps_sibling_results(tmp_path: Path) -> None:
         model=model,
         tools=ToolRegistry([_task_tool(delegate)]),
         context=ContextManager(system_prompt="system", original_task="investigate"),
+        on_event=on_event,
         parallel_tool_names=frozenset({"delegate_task"}),
     )
 
     with ThreadPoolExecutor(max_workers=1) as pool:
         future = pool.submit(runner.run)
-        assert all_started.wait(2)
-        release.set()
+        assert all_started.wait(5)
+        assert failure_emitted.wait(5)
+        with lock:
+            assert result_call_ids == ["b"]
+        assert not future.done()
+        release_siblings.set()
         assert future.result().status == "completed"
 
     results = [message for message in model.requests[1][0] if message["role"] == "tool"]

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import json
 from typing import Any, Callable
 
@@ -197,14 +197,20 @@ class AgentRunner:
                 max_workers=min(self.max_parallel_tools, len(calls)),
                 thread_name_prefix="coding-agent-child",
             ) as pool:
-                futures = [
-                    pool.submit(self.tools.execute, call.name, call.arguments)
-                    for call in calls
-                ]
-                results = [future.result() for future in futures]
-            for call, result in zip(calls, results):
-                self._emit_tool_result(step, call, result)
-            return results
+                futures = {
+                    pool.submit(self.tools.execute, call.name, call.arguments): (
+                        index,
+                        call,
+                    )
+                    for index, call in enumerate(calls)
+                }
+                results_by_index: dict[int, ToolResult] = {}
+                for future in as_completed(futures):
+                    index, call = futures[future]
+                    result = future.result()
+                    results_by_index[index] = result
+                    self._emit_tool_result(step, call, result)
+            return [results_by_index[index] for index in range(len(calls))]
 
         results: list[ToolResult] = []
         for call in calls:

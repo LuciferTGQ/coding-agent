@@ -67,6 +67,40 @@ def test_window_loads_persistent_session_and_renders_event_cards(tmp_path: Path)
     app.processEvents()
 
 
+def test_tool_cards_update_by_call_id_when_results_arrive_out_of_order(
+    tmp_path: Path,
+) -> None:
+    app = _app()
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    store = SessionStore(tmp_path / "state")
+    session = store.create(workspace=workspace)
+    window = MainWindow(store)
+    window.load_session(session.id)
+
+    for call_id in ("slow", "fast"):
+        window._handle_session_event(
+            session.id,
+            AgentEvent("tool_call", 1, call_id, "delegate_task", None, call_id),
+        )
+    window._handle_session_event(
+        session.id,
+        AgentEvent("tool_result", 1, "fast findings", "delegate_task", True, "fast"),
+    )
+
+    assert "执行中" in window.conversation._tools["slow"].toggle.text()
+    assert "已完成" in window.conversation._tools["fast"].toggle.text()
+    assert "fast findings" in window.conversation._tools["fast"].detail.toPlainText()
+
+    window._handle_session_event(
+        session.id,
+        AgentEvent("tool_result", 1, "slow findings", "delegate_task", True, "slow"),
+    )
+    assert "已完成" in window.conversation._tools["slow"].toggle.text()
+    window.close()
+    app.processEvents()
+
+
 def test_empty_window_keeps_new_conversation_available(tmp_path: Path) -> None:
     app = _app()
     window = MainWindow(SessionStore(tmp_path / "empty-state"))
