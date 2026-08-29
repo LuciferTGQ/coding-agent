@@ -3,12 +3,16 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from concurrent.futures import ThreadPoolExecutor
 import json
 from typing import Any, Callable
 
 from coding_agent.context import ContextManager, SummaryCallback
-from coding_agent.llm import ModelClient, ModelError, ModelStreamEvent
+from coding_agent.llm import ModelClient, ModelError, ModelStreamEvent, ToolCall
+from coding_agent.tools.base import ToolResult
 from coding_agent.tools.registry import ToolRegistry
+
+MAX_PARALLEL_TOOL_WORKERS = 4
 
 
 @dataclass(frozen=True, slots=True)
@@ -47,6 +51,8 @@ class AgentRunner:
         stream: bool = False,
         should_cancel: Callable[[], bool] | None = None,
         summarizer: SummaryCallback | None = None,
+        parallel_tool_names: frozenset[str] = frozenset(),
+        max_parallel_tools: int = 4,
     ) -> None:
         self.model = model
         self.tools = tools
@@ -57,6 +63,10 @@ class AgentRunner:
         self.stream = stream
         self.should_cancel = should_cancel or (lambda: False)
         self.summarizer = summarizer
+        self.parallel_tool_names = parallel_tool_names
+        self.max_parallel_tools = max(
+            1, min(MAX_PARALLEL_TOOL_WORKERS, max_parallel_tools)
+        )
         self._current_step = 0
 
     def run(self, task: str | None = None) -> AgentResult:
@@ -121,18 +131,11 @@ class AgentRunner:
                     verification_observed=verification_observed,
                 )
 
-            tool_messages: list[dict[str, Any]] = []
             if self.should_cancel():
                 return self._cancelled(step, workspace_changed, verification_observed)
-            for call in response.tool_calls:
-                self._emit(
-                    "tool_call",
-                    step,
-                    _summarize_arguments(call.arguments),
-                    tool_name=call.name,
-                    call_id=call.id,
-                )
-                result = self.tools.execute(call.name, call.arguments)
+            results = self._execute_tool_calls(response.tool_calls, step)
+            tool_messages: list[dict[str, Any]] = []
+            for call, result in zip(response.tool_calls, results):
                 if result.ok:
                     consecutive_tool_errors = 0
                 else:
@@ -144,14 +147,6 @@ class AgentRunner:
                 if result.ok and result.verification:
                     verification_observed = True
                     verified_revision = workspace_revision
-                self._emit(
-                    "tool_result",
-                    step,
-                    result.message,
-                    tool_name=call.name,
-                    ok=result.ok,
-                    call_id=call.id,
-                )
                 tool_messages.append(
                     {
                         "role": "tool",
@@ -185,6 +180,57 @@ class AgentRunner:
             status="max_steps",
             workspace_changed=workspace_changed,
             verification_observed=verification_observed,
+        )
+
+    def _execute_tool_calls(
+        self, calls: tuple[ToolCall, ...], step: int
+    ) -> list[ToolResult]:
+        parallel = (
+            len(calls) > 1
+            and bool(self.parallel_tool_names)
+            and all(call.name in self.parallel_tool_names for call in calls)
+        )
+        if parallel:
+            for call in calls:
+                self._emit_tool_call(step, call)
+            with ThreadPoolExecutor(
+                max_workers=min(self.max_parallel_tools, len(calls)),
+                thread_name_prefix="coding-agent-child",
+            ) as pool:
+                futures = [
+                    pool.submit(self.tools.execute, call.name, call.arguments)
+                    for call in calls
+                ]
+                results = [future.result() for future in futures]
+            for call, result in zip(calls, results):
+                self._emit_tool_result(step, call, result)
+            return results
+
+        results: list[ToolResult] = []
+        for call in calls:
+            self._emit_tool_call(step, call)
+            result = self.tools.execute(call.name, call.arguments)
+            self._emit_tool_result(step, call, result)
+            results.append(result)
+        return results
+
+    def _emit_tool_call(self, step: int, call: ToolCall) -> None:
+        self._emit(
+            "tool_call",
+            step,
+            _summarize_arguments(call.arguments),
+            tool_name=call.name,
+            call_id=call.id,
+        )
+
+    def _emit_tool_result(self, step: int, call: ToolCall, result: ToolResult) -> None:
+        self._emit(
+            "tool_result",
+            step,
+            result.message,
+            tool_name=call.name,
+            ok=result.ok,
+            call_id=call.id,
         )
 
     def _emit(

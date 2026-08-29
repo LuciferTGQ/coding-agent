@@ -19,6 +19,7 @@ from coding_agent.sessions import (
     SessionStore,
     title_from_message,
 )
+from coding_agent.subagents import DelegateTaskService
 from coding_agent.tools import ToolRegistry, create_command_tool, create_file_tools
 from coding_agent.workspace import Workspace
 
@@ -146,33 +147,54 @@ class SessionRuntime:
             max_steps=self.max_steps,
             require_api_key=self._requires_api_key,
         )
+        subagents_enabled = session.subagents_enabled
         context = (
             ContextManager.from_dict(session.model_context)
             if session.model_context
             else ContextManager(
                 system_prompt=build_system_prompt(
-                    workspace.root, response_language=response_language
+                    workspace.root,
+                    response_language=response_language,
+                    subagents_enabled=subagents_enabled,
                 ),
                 soft_budget_chars=config.context_soft_budget_chars,
             )
         )
         context.set_system_prompt(
-            build_system_prompt(workspace.root, response_language=response_language)
+            build_system_prompt(
+                workspace.root,
+                response_language=response_language,
+                subagents_enabled=subagents_enabled,
+            )
         )
+        model = self.model_factory(config)
+        tools = [
+            *create_file_tools(
+                workspace,
+                max_read_lines=config.max_read_lines,
+                max_write_chars=config.max_write_chars,
+                max_search_results=config.max_search_results,
+            ),
+            create_command_tool(
+                workspace,
+                default_timeout=config.command_timeout,
+                output_limit=config.tool_output_limit,
+            ),
+        ]
+        if subagents_enabled:
+            delegation = DelegateTaskService(
+                workspace=workspace.root,
+                model_factory=lambda: self.model_factory(config),
+                should_cancel=should_cancel or (lambda: False),
+                max_steps=config.subagent_max_steps,
+                max_delegations=config.max_delegations_per_turn,
+                max_read_lines=config.max_read_lines,
+                max_search_results=config.max_search_results,
+                tool_output_limit=config.tool_output_limit,
+            )
+            tools.append(delegation.tool())
         registry = ToolRegistry(
-            [
-                *create_file_tools(
-                    workspace,
-                    max_read_lines=config.max_read_lines,
-                    max_write_chars=config.max_write_chars,
-                    max_search_results=config.max_search_results,
-                ),
-                create_command_tool(
-                    workspace,
-                    default_timeout=config.command_timeout,
-                    output_limit=config.tool_output_limit,
-                ),
-            ],
+            tools,
             output_limit=config.tool_output_limit,
         )
         def record(event: AgentEvent) -> None:
@@ -181,7 +203,6 @@ class SessionRuntime:
             if event.kind not in {"reasoning_delta", "content_delta", "step"}:
                 persist_session()
 
-        model = self.model_factory(config)
         runner = AgentRunner(
             model=model,
             tools=registry,
@@ -191,6 +212,10 @@ class SessionRuntime:
             stream=stream,
             should_cancel=should_cancel,
             summarizer=ModelContextSummarizer(model, max_chars=context.summary_max_chars),
+            parallel_tool_names=(
+                frozenset({"delegate_task"}) if subagents_enabled else frozenset()
+            ),
+            max_parallel_tools=config.max_parallel_subagents,
         )
         try:
             result = runner.run(model_message)

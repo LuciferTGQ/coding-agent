@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import os
+import json
 from pathlib import Path
-from threading import Event
+from threading import Event, Lock
 import time
+from typing import Sequence
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
@@ -12,12 +14,14 @@ from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QFileDialog
 
 from coding_agent.agent import AgentEvent, AgentResult
+from coding_agent.llm import AssistantResponse, ToolCall
 import coding_agent.gui.app as gui_app
 from coding_agent.gui.app import MainWindow
 from coding_agent.gui.settings import AppSettings, SettingsStore
 from coding_agent.gui.sidebar import SessionRow
 from coding_agent.gui.widgets import MessageBubble
 from coding_agent.sessions import SessionStore
+from coding_agent.session_runtime import SessionRuntime as RealSessionRuntime
 
 
 def _app() -> QApplication:
@@ -86,6 +90,7 @@ def test_saved_english_setting_applies_to_next_window(tmp_path: Path) -> None:
 
     assert window.new_button.text() == "＋  New conversation"
     assert window.settings_button.text() == "Settings"
+    assert window.subagent_label.text() == "Sub-agents"
     assert window.language == "en"
     assert window.settings.max_steps == 17
     window.close()
@@ -344,8 +349,44 @@ def test_running_session_does_not_disable_navigation_or_draft_editor(tmp_path: P
     assert window.new_button.isEnabled()
     assert window.session_list.isEnabled()
     assert not window.send_button.isEnabled()
+    assert not window.subagent_toggle.isEnabled()
     assert not window.stop_button.isHidden()
     window.task_manager.workers.clear()
+    window.close()
+    app.processEvents()
+
+
+def test_subagent_toggle_defaults_off_and_persists_per_session(tmp_path: Path) -> None:
+    app = _app()
+    workspace_a = tmp_path / "workspace-a"
+    workspace_b = tmp_path / "workspace-b"
+    workspace_a.mkdir()
+    workspace_b.mkdir()
+    store = SessionStore(tmp_path / "subagent-toggle-state")
+    session_a = store.create(workspace=workspace_a, title="A")
+    session_a.transcript = [{"type": "user", "text": "keep history"}]
+    store.save(session_a)
+    session_b = store.create(
+        workspace=workspace_b,
+        title="B",
+        subagents_enabled=True,
+    )
+    window = MainWindow(store)
+
+    window.load_session(session_a.id)
+    assert not window.subagent_toggle.isChecked()
+    window.subagent_toggle.setChecked(True)
+    assert store.load(session_a.id).subagents_enabled is True
+    assert store.load(session_a.id).transcript[0]["text"] == "keep history"
+    assert store.load(session_a.id).workspace == str(workspace_a.resolve())
+
+    window.load_session(session_b.id)
+    assert window.subagent_toggle.isChecked()
+    window.subagent_toggle.setChecked(False)
+    assert store.load(session_b.id).subagents_enabled is False
+
+    window.load_session(session_a.id)
+    assert window.subagent_toggle.isChecked()
     window.close()
     app.processEvents()
 
@@ -473,6 +514,159 @@ def test_main_window_runs_two_sessions_and_marks_background_completion_unread(
     assert window.task_manager.running_count() == 0
     window.close()
     app.processEvents()
+
+
+def test_two_gui_sessions_remain_isolated_while_one_runs_parallel_children(
+    tmp_path: Path, monkeypatch
+) -> None:
+    app = _app()
+    children_started = Event()
+    release_children = Event()
+    session_b_started = Event()
+    release_session_b = Event()
+    factory_lock = Lock()
+    child_count = 0
+    parent_a_requests = []
+
+    def response(content: str = "", *calls: tuple[str, str, dict]) -> AssistantResponse:
+        tool_calls = tuple(
+            ToolCall(call_id, name, json.dumps(arguments))
+            for call_id, name, arguments in calls
+        )
+        provider = {"role": "assistant", "content": content}
+        if tool_calls:
+            provider["tool_calls"] = [
+                {
+                    "id": call.id,
+                    "type": "function",
+                    "function": {"name": call.name, "arguments": call.arguments},
+                }
+                for call in tool_calls
+            ]
+        return AssistantResponse(content, tool_calls, provider)
+
+    class ParentAModel:
+        def __init__(self) -> None:
+            self.step = 0
+
+        def complete(self, *, messages: Sequence[dict], tools: Sequence[dict]) -> AssistantResponse:
+            parent_a_requests.append((list(messages), list(tools)))
+            self.step += 1
+            if self.step == 1:
+                assert "delegate_task" in [item["function"]["name"] for item in tools]
+                return response(
+                    "",
+                    ("a-child-1", "delegate_task", {"task": "inspect module one"}),
+                    ("a-child-2", "delegate_task", {"task": "inspect module two"}),
+                )
+            return response("A completed from child findings")
+
+    class ChildModel:
+        def complete(self, *, messages: Sequence[dict], tools: Sequence[dict]) -> AssistantResponse:
+            nonlocal child_count
+            assert [item["function"]["name"] for item in tools] == [
+                "list_files",
+                "read_file",
+                "search_text",
+            ]
+            with factory_lock:
+                child_count += 1
+                if child_count == 2:
+                    children_started.set()
+            assert release_children.wait(3)
+            return response("condensed child finding")
+
+    class SessionBModel:
+        def complete(self, *, messages: Sequence[dict], tools: Sequence[dict]) -> AssistantResponse:
+            assert "delegate_task" not in [item["function"]["name"] for item in tools]
+            session_b_started.set()
+            assert release_session_b.wait(3)
+            return response("B completed independently")
+
+    class RoutedRuntime:
+        def __init__(self, store, **kwargs) -> None:
+            self.store = store
+            self.kwargs = kwargs
+
+        def run_turn(self, session_id, message, **kwargs) -> AgentResult:
+            created = 0
+            creation_lock = Lock()
+
+            def factory(_config):
+                nonlocal created
+                if session_id == session_b.id:
+                    return SessionBModel()
+                with creation_lock:
+                    created += 1
+                    return ParentAModel() if created == 1 else ChildModel()
+
+            return RealSessionRuntime(
+                self.store,
+                model_factory=factory,
+                language=self.kwargs.get("language"),
+                max_steps=self.kwargs.get("max_steps"),
+            ).run_turn(session_id, message, **kwargs)
+
+    workspace_a = tmp_path / "workspace-a"
+    workspace_b = tmp_path / "workspace-b"
+    workspace_a.mkdir()
+    workspace_b.mkdir()
+    store = SessionStore(tmp_path / "combined-parallel-state")
+    session_a = store.create(
+        workspace=workspace_a,
+        title="A",
+        subagents_enabled=True,
+    )
+    session_b = store.create(workspace=workspace_b, title="B")
+    monkeypatch.setattr(gui_app, "SessionRuntime", RoutedRuntime)
+    window = MainWindow(store)
+    try:
+        window.load_session(session_a.id)
+        window.editor.setPlainText("task A")
+        window.send_message()
+        window.load_session(session_b.id)
+        window.editor.setPlainText("task B")
+        window.send_message()
+
+        deadline = time.monotonic() + 3
+        while (
+            not (children_started.is_set() and session_b_started.is_set())
+            and time.monotonic() < deadline
+        ):
+            app.processEvents()
+        assert children_started.is_set()
+        assert session_b_started.is_set()
+        assert window.task_manager.running_count() == 2
+        assert "a-child-1" not in window.conversation._tools
+
+        release_children.set()
+        deadline = time.monotonic() + 3
+        while window.task_manager.is_running(session_a.id) and time.monotonic() < deadline:
+            app.processEvents()
+        assert not window.task_manager.is_running(session_a.id)
+        assert window.task_manager.is_running(session_b.id)
+        assert store.load(session_a.id).unread is True
+
+        tool_results = [
+            message for message in parent_a_requests[1][0] if message.get("role") == "tool"
+        ]
+        assert [message["tool_call_id"] for message in tool_results] == [
+            "a-child-1",
+            "a-child-2",
+        ]
+        assert len(store.list()) == 2
+        assert not any(
+            item.get("name") == "delegate_task"
+            for item in store.load(session_b.id).transcript
+        )
+    finally:
+        release_children.set()
+        release_session_b.set()
+        deadline = time.monotonic() + 3
+        while window.task_manager.running_count() and time.monotonic() < deadline:
+            app.processEvents()
+        window.close()
+        app.processEvents()
 
 
 def test_close_requests_cooperative_stop_all(tmp_path: Path, monkeypatch) -> None:

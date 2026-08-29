@@ -69,6 +69,7 @@ def test_optional_sidebar_metadata_is_backward_compatible(tmp_path: Path) -> Non
 
     assert loaded.pinned is False
     assert loaded.unread is False
+    assert loaded.subagents_enabled is False
     assert loaded.workspace == str(workspace.resolve())
     assert loaded.transcript == session.transcript
     assert loaded.model_context == session.model_context
@@ -507,3 +508,39 @@ def test_summary_provider_failure_does_not_abort_main_turn_or_replace_context(
     assert restored.summary is None
     assert restored.summary_failures == 1
     assert "historical task 0" in str(restored.messages())
+
+
+def test_subagent_tool_availability_follows_independent_session_setting(
+    tmp_path: Path,
+) -> None:
+    class ToolCaptureModel:
+        def __init__(self) -> None:
+            self.tool_names = []
+
+        def complete(self, *, messages: Sequence[dict], tools: Sequence[dict]) -> AssistantResponse:
+            self.tool_names.append([item["function"]["name"] for item in tools])
+            return AssistantResponse(
+                content="done",
+                tool_calls=(),
+                provider_message={"role": "assistant", "content": "done"},
+            )
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    store = SessionStore(tmp_path / "subagent-setting-state")
+    disabled = store.create(workspace=workspace, title="disabled")
+    enabled = store.create(workspace=workspace, title="enabled", subagents_enabled=True)
+    disabled_model = ToolCaptureModel()
+    enabled_model = ToolCaptureModel()
+
+    SessionRuntime(store, model_factory=lambda _: disabled_model).run_turn(
+        disabled.id, "simple task", stream=False
+    )
+    SessionRuntime(store, model_factory=lambda _: enabled_model).run_turn(
+        enabled.id, "complex task", stream=False
+    )
+
+    assert "delegate_task" not in disabled_model.tool_names[0]
+    assert "delegate_task" in enabled_model.tool_names[0]
+    assert store.load(disabled.id).subagents_enabled is False
+    assert store.load(enabled.id).subagents_enabled is True

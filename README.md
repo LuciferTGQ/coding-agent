@@ -9,6 +9,7 @@ NJU Coding Agent 是一个轻量、自实现 Harness 的本地 Coding Agent。�
 - 在单 Agent 循环中完成“观察、行动、获取反馈、继续调整”的多步编程任务。
 - 以多轮会话持续处理同一 Workspace，关闭应用后可恢复完整对话和模型上下文。
 - 桌面端可让多个独立 Session 同时运行；事件、Stop、上下文和状态按 Session 隔离。
+- 每个 GUI Session 可选择开启只读 Sub-Agent；Main 可并行委派最多 4 个独立调查并只接收 condensed findings。
 - 流式展示回答、可折叠 reasoning 和带状态的工具卡片；模型与工具运行在后台线程。
 - 通过六个受限工具浏览、搜索、读取、写入、精确编辑文件并执行命令。
 - 将 stdout、stderr、退出码和超时信息回传给模型，让失败成为下一步决策的输入。
@@ -28,6 +29,7 @@ CLI ───────────────────→ SessionRuntime 
 DeepSeek Chat Client (streaming or non-streaming)
        ↓ tool_calls     ↑ assistant + tool results
 ToolRegistry → Workspace / local subprocess
+       └ optional delegate_task → bounded pool → isolated read-only Child Agent(s)
 ```
 
 `AgentRunner` 仍只负责编排。桌面层通过 `SessionRuntime` 复用同一 Harness，并将完整 UI transcript 与有预算的 provider context 分开持久化。模型适配、上下文、工具解析和环境操作分属不同模块，因此可以用 FakeModel 和临时 Workspace 分别测试。更完整的数据流和取舍见 [架构文档](docs/architecture.md)。
@@ -85,6 +87,8 @@ coding-agent-gui
 
 不同 Session 可以独立并行运行。切换会话不会把后台事件写入当前对话；后台完成显示未读圆点，后台失败显示 `!`，菜单可单独停止后台任务。同一 Workspace 的多个 Session 也可并发，但启动第二个任务前会明确警告：当前版本不提供修改隔离、文件锁、自动合并或一致性保证。
 
+输入区提供每个 Session 独立保存的 **子代理** Toggle，默认关闭。开启后 Main 可以按需使用 `delegate_task`，并在一次纯 delegation batch 中并行启动最多 4 个临时只读 Child；简单任务不会被强制委派。Child 只获得 `list_files`、`read_file`、`search_text`，使用独立 Context 和 ModelClient，其内部探索不会进入 Main Context，只有最终 findings 作为原 call id 的 Tool Result 返回。修改 Workspace 和最终验证仍由 Main 完成。运行中的 Turn 使用启动时的开关快照。
+
 轻量设置弹窗提供界面语言、默认模型、默认思考强度和默认最大步骤。语言可选择中文或 English；保存语言变更后可以稍后应用，也可以安全启动新进程并立即重启。中文界面会要求模型除代码、命令、路径和必要技术标识外，默认使用中文交流。Tool 名称、JSON Schema 和 DeepSeek 协议字段不会被翻译。
 
 快捷键：`Ctrl+N` 新建对话，`Ctrl+,` 打开设置，`Ctrl+Return` 发送消息。
@@ -120,6 +124,7 @@ python -m coding_agent --workspace .\path\to\project --max-steps 20 `
 | `write_file` | 创建文本；覆盖已有文件必须显式设置 `overwrite=true` |
 | `edit_file` | `old_text` 必须恰好出现一次，成功后返回 unified diff |
 | `run_command` | 使用 argv 列表和 `shell=False` 运行测试、构建、检查或程序 |
+| `delegate_task` | GUI 按 Session 可选；委派临时只读调查，纯 delegation batch 最多 4 个并行 Child |
 
 `ToolRegistry` 统一处理未知工具、无效 JSON、缺少参数、类型错误、枚举错误和多余参数。文件不存在、编辑歧义、命令非零退出和超时都会作为 Tool Result 回传模型，而不是直接终止 Agent。
 
@@ -176,8 +181,9 @@ python scripts/live_smoke.py
 
 - 目前只实现 DeepSeek Chat Completions provider，桌面模型列表只提供已按该协议验证的 `deepseek-v4-flash`。
 - Context soft budget 是序列化消息的近似字符预算，并非精确 token 计数；Rolling Summary 仍可能遗漏次要历史细节。
-- 当前没有 Repo Map、RAG、LSP 或协作式多 Agent 编排；并行能力是多个彼此独立的单 Agent Session。
+- 当前没有 Repo Map、RAG、LSP 或长期协作式 Agent 拓扑；Sub-Agent 是无持久历史的临时只读调查对象。
 - Stop 是协作式边界停止，不会中断正在进行的网络请求或单个工具 handler。
+- 每个 Parent turn 最多委派 8 次、同时最多运行 4 个 Child；已进入模型网络调用的 Child 只能在调用返回后的安全边界响应 Stop。
 - 同一 Workspace 并发不保证修改隔离和一致性。Git Worktree 可作为未来的每任务独立副本方案，但当前版本不会自动创建。
 - Exact replacement 适合小而精确的变更，不适合大规模结构化重构。
 - 本地 command filtering 不能替代容器、VM 或其他 OS 级隔离。

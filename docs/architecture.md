@@ -23,7 +23,9 @@ Runtime composition                     ↓
            ↓
        ToolRegistry
            ├─ list/read/search/write/edit → Workspace
-           └─ run_command → Workspace cwd + subprocess
+           ├─ run_command → Workspace cwd + subprocess
+           └─ optional delegate_task → bounded pool
+                    └─ temporary Child: fresh model/context + read-only tools
            ↓
        ToolResult (stdout/stderr/exit code/diff/error)
            ↓
@@ -58,7 +60,7 @@ DeepSeek 官方协议要求：携带 tools 的 thinking 多轮中，assistant �
 声明与本地函数之间唯一桥梁：注册、生成 Chat Completions tool definitions、解析 JSON、检查
 必需字段/类型/enum/多余参数、捕获 handler 异常并返回统一 `ToolResult`。
 
-没有实现完整 JSON Schema draft。六个工具只需要 object、string、integer、boolean、array、
+没有实现完整 JSON Schema draft。核心工具只需要 object、string、integer、boolean、array、
 enum 和简单范围；实现 `$ref`、`oneOf` 等只会增加与 Agent 核心无关的复杂度。
 
 ### Workspace 与 Tools
@@ -99,9 +101,17 @@ for step in max_steps:
 max_steps → controlled stop
 ```
 
-多个 tool call 顺序执行，因为文件操作有副作用；并行会让结果依赖调度顺序。畸形调用、路径
-失败、命令非零和 timeout 都是 Agent 可观察的反馈，不直接结束整个进程。连续工具错误和最大
-步数提供有限的循环保护。Agent 不靠 planner/reviewer 状态机，模型在同一反馈循环中自行调整。
+普通和 mixed tool call 顺序执行，因为文件操作有副作用；并行会让结果依赖调度顺序。唯一例外是整批 call 都属于 `delegate_task`：Runner 先按 provider 顺序展示全部 call，再交给最多 4 worker 的有界线程池，最后仍按原 call 顺序和 call id 写回全部 Tool Results。畸形调用、路径失败、命令非零和 timeout 都是 Agent 可观察的反馈，不直接结束整个进程。连续工具错误和最大步数提供有限的循环保护。Agent 不靠 planner/reviewer 状态机，模型在同一反馈循环中自行调整。
+
+### Optional Sub-Agent delegation
+
+GUI 的每个 Session 保存独立 `subagents_enabled` metadata，旧 Session 默认 false。Toggle 在 Worker 运行期间禁用，因此本轮使用启动时从 Session 加载的能力快照。关闭时 system prompt 不描述 delegation，Registry 也没有 `delegate_task`；开启时两者同时出现。CLI 默认不暴露该能力。
+
+`delegate_task(task)` 进入 `DelegateTaskService`。Service 属于一个 parent user turn，使用锁内计数限制本轮最多 8 次委派；每次调用都新建 `Workspace`、只含 list/read/search 的 `ToolRegistry`、`ModelClient`、`ContextManager` 和 `AgentRunner`，Child max steps 为 8。Child 没有 write/edit/run/delegate，无法递归委派，也不创建 `Session`、Sidebar item 或长期记忆。
+
+Child 的 delegated task 是唯一 user message，Main 完整历史不会复制进去。Child 内部的 list/read/search trajectory 只存在于临时 Context；Main 最终只收到一个 bounded `ToolResult`，内容为 Child final findings 与 status/steps。这样大量局部探索不会污染 Parent model context。Main 仍负责决策、文件修改、Verification Guard 和用户回答。
+
+纯 delegation batch 使用 `ThreadPoolExecutor(max_workers=min(4, calls))` 真正并行；5 个以上 call 会在池内排队而不会创建更多线程。future 全部提交后按原 call 列表读取结果，因此 completion timing 不改变 provider 顺序。Registry 把单个 Child 异常转成该 call 的失败结果，sibling 仍可完成。Parent Stop 的同一个 cooperative flag 传入所有 Child；网络调用无法强制中断，但返回后 Child 会在模型/工具安全边界停止。这里没有 thread terminate。
 
 ### ContextManager
 
@@ -121,7 +131,7 @@ Summary 与 Context compaction 统计进入 `model_context` version 2；`from_di
 
 ### SessionStore 与桌面层
 
-`SessionStore` 在 `~/.nju-coding-agent/sessions/` 中以单会话 JSON 文件保存 id、标题、Workspace、模型、reasoning effort、UTC 时间、置顶/未读 metadata、完整 UI transcript 和序列化的模型上下文。新增 metadata 仍使用 schema v1 的可选默认字段，因此旧 Session 无需迁移即可加载。置顶会话和普通会话分别按 `updated_at` 倒序排列。写入使用进程内 per-session lock，为每次保存创建唯一临时文件，再用原子 replace 提交；Windows 短暂拒绝 replace 时进行有限退避重试，并在失败后清理临时文件。API Key 不属于 Session 数据结构。
+`SessionStore` 在 `~/.nju-coding-agent/sessions/` 中以单会话 JSON 文件保存 id、标题、Workspace、模型、reasoning effort、UTC 时间、置顶/未读/Sub-Agent metadata、完整 UI transcript 和序列化的模型上下文。新增 metadata 仍使用 schema v1 的可选默认字段，因此旧 Session 无需迁移即可加载。置顶会话和普通会话分别按 `updated_at` 倒序排列。写入使用进程内 per-session lock，为每次保存创建唯一临时文件，再用原子 replace 提交；Windows 短暂拒绝 replace 时进行有限退避重试，并在失败后清理临时文件。API Key 不属于 Session 数据结构。
 
 Worker 使用 `save_runtime()` 写 transcript/model context，并合并磁盘上较新的 GUI metadata；重命名、置顶和未读则通过 `update_metadata()` 做锁内 patch，避免两个 stale Session 对象互相覆盖。非关键 event 的持久化失败不会中断 Tool 执行：GUI 显示独立 warning，后续 event 和 turn 结束时继续尝试完整保存。该机制提供同一进程的线程安全，不提供多个 GUI 进程同时写同一 Session 的跨进程事务保证。
 
@@ -135,7 +145,7 @@ GUI 文案由一个集中维护的 `zh/en` 映射提供，不使用额外 locale
 
 每个 Session 固定绑定一个 Workspace。已有历史时切换目录会创建新 Session，从结构上避免项目 A 的工具结果进入项目 B 的模型上下文。附件不会绕过这条边界：内部文件只记录相对路径；外部文件必须经确认复制进 Workspace，随后仍通过 `Workspace.resolve_path()` 和文件工具读取。
 
-Qt 主线程只处理窗口和控件。`AgentTaskManager` 维护 `workers[session_id]`；每个 `AgentWorker` 在自己的 `QThread` 中运行一套既有 `SessionRuntime → AgentRunner → ToolRegistry → Workspace`。Manager 只把 queued signals 包装为 `(session_id, event/result/error)`，不参与 prompt、reasoning、Tool Calling 或 Context 裁剪。前台 Session 实时渲染自己的 event，后台 event 只更新对应 Sidebar 状态；切回时从该 Session 的持久 transcript 恢复。
+Qt 主线程只处理窗口和控件。`AgentTaskManager` 维护 `workers[session_id]`；每个 `AgentWorker` 在自己的 `QThread` 中运行一套既有 `SessionRuntime → AgentRunner → ToolRegistry → Workspace`。Manager 只把 queued signals 包装为 `(session_id, event/result/error)`，不参与 prompt、reasoning、Tool Calling 或 Context 裁剪。前台 Session 实时渲染自己的 event，后台 event 只更新对应 Sidebar 状态；切回时从该 Session 的持久 transcript 恢复。Parallel GUI Sessions 是多个持久 Parent 各自运行；Parallel Sub-Agent 则是单个 Parent turn 内部的临时只读 children，两者生命周期与状态层级不同。
 
 同一个 Session 同时最多有一个 Worker，不实现消息队列。不同 Session 可以并发，Stop 按 session_id 设置各自的协作式 cancellation flag；关闭应用时 `stop_all()` 请求所有 Worker 在安全边界停止，绝不调用 `QThread.terminate()`。多个运行任务存在时，语言设置可以保存，但立即重启被推迟。
 
@@ -195,7 +205,7 @@ Aider 的 Repo Map 用语法树和依赖图在大仓库中选择重要符号。�
 
 - Unit：Config、DeepSeek normalization/retry、Workspace、Registry、每个 Tool、Context；
 - Boundary and execution：`../`/absolute/symlink escape、Secret 拒绝、invalid JSON/参数、exact edit 三种结果、命令
-  success/non-zero/timeout、完整块裁剪、Verification Guard、max steps；
+  success/non-zero/timeout、Context compaction、Verification Guard、max steps、Sub-Agent limits/cancellation；
 - Integration：FakeModel + real AgentRunner + real Registry/Workspace 完成 read/edit/execute/final；
 - Live protocol：显式脚本验证 thinking/tool/result/next request；
 - Live E2E：自然语言任务驱动真实 DeepSeek 完成探索、失败、修改和再次测试。

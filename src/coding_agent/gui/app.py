@@ -45,6 +45,7 @@ from coding_agent.gui.settings import (
 )
 from coding_agent.gui.widgets import ConversationView
 from coding_agent.gui.task_manager import AgentTaskManager
+from coding_agent.gui.toggle import ToggleSwitch
 from coding_agent.session_runtime import SessionRuntime
 from coding_agent.sessions import Session, SessionPersistenceError, SessionStore
 
@@ -212,6 +213,11 @@ class MainWindow(QMainWindow):
         self.effort_combo.addItems(REASONING_EFFORTS)
         self.effort_combo.setCurrentText(self.settings.reasoning_effort)
         self.effort_combo.currentTextChanged.connect(self._settings_changed)
+        self.subagent_label = QLabel(tr(self.language, "subagents"))
+        self.subagent_toggle = ToggleSwitch()
+        self.subagent_toggle.setAccessibleName(tr(self.language, "subagents"))
+        self.subagent_toggle.setToolTip(tr(self.language, "subagents_tooltip"))
+        self.subagent_toggle.toggled.connect(self._subagents_changed)
         self.stop_button = QPushButton(tr(self.language, "stop"))
         self.stop_button.setObjectName("stopButton")
         self.stop_button.setVisible(False)
@@ -225,6 +231,8 @@ class MainWindow(QMainWindow):
         controls.addWidget(self.model_combo)
         controls.addWidget(QLabel(tr(self.language, "reasoning_effort")))
         controls.addWidget(self.effort_combo)
+        controls.addWidget(self.subagent_label)
+        controls.addWidget(self.subagent_toggle)
         controls.addWidget(self.stop_button)
         controls.addWidget(self.send_button)
         composer_layout.addWidget(self.workspace_button, alignment=Qt.AlignLeft)
@@ -463,6 +471,9 @@ class MainWindow(QMainWindow):
         self.effort_combo.blockSignals(True)
         self.model_combo.setCurrentText(session.model)
         self.effort_combo.setCurrentText(session.reasoning_effort)
+        self.subagent_toggle.blockSignals(True)
+        self.subagent_toggle.setChecked(session.subagents_enabled)
+        self.subagent_toggle.blockSignals(False)
         self.model_combo.blockSignals(False)
         self.effort_combo.blockSignals(False)
         draft_text, draft_attachments = self.drafts.get(session.id, ("", []))
@@ -788,6 +799,17 @@ class MainWindow(QMainWindow):
             reasoning_effort=self.effort_combo.currentText(),
         )
 
+    def _subagents_changed(self, enabled: bool) -> None:
+        if (
+            not self.current_session
+            or self.task_manager.is_running(self.current_session.id)
+        ):
+            return
+        self.current_session = self.store.update_metadata(
+            self.current_session.id,
+            subagents_enabled=enabled,
+        )
+
     def _session_selected(self, current: QListWidgetItem | None) -> None:
         if current:
             self.load_session(current.data(Qt.UserRole))
@@ -806,6 +828,9 @@ class MainWindow(QMainWindow):
         self.conversation.add_status(tr(self.language, "empty_status"))
         self.editor.clear()
         self.attachments.clear()
+        self.subagent_toggle.blockSignals(True)
+        self.subagent_toggle.setChecked(False)
+        self.subagent_toggle.blockSignals(False)
         self._update_attachments()
         self._sync_controls()
 
@@ -820,6 +845,7 @@ class MainWindow(QMainWindow):
         self.attach_button.setEnabled(has_session and not running)
         self.model_combo.setEnabled(has_session and not running)
         self.effort_combo.setEnabled(has_session and not running)
+        self.subagent_toggle.setEnabled(has_session and not running)
         self.send_button.setEnabled(has_session and not running)
         self.new_button.setEnabled(True)
         self.session_list.setEnabled(True)

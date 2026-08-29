@@ -35,3 +35,13 @@ def test_language_preference_does_not_change_tool_names_or_schema(tmp_path) -> N
     ]
     assert all(item["type"] == "function" for item in definitions)
     assert all(item["function"]["parameters"]["type"] == "object" for item in definitions)
+
+
+def test_delegation_policy_only_appears_when_subagents_are_enabled(tmp_path) -> None:
+    disabled = build_system_prompt(tmp_path, subagents_enabled=False)
+    enabled = build_system_prompt(tmp_path, subagents_enabled=True)
+
+    assert "delegate_task" not in disabled
+    assert "delegate_task" in enabled
+    assert "Do not delegate simple tasks" in enabled
+    assert "you remain responsible" in enabled

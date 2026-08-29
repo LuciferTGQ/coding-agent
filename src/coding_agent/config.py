@@ -42,6 +42,9 @@ class Config:
     max_read_lines: int = 200
     max_write_chars: int = 200_000
     max_search_results: int = 100
+    max_parallel_subagents: int = 4
+    subagent_max_steps: int = 8
+    max_delegations_per_turn: int = 8
 
     @classmethod
     def from_sources(

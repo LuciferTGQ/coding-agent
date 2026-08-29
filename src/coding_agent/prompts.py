@@ -5,7 +5,12 @@ from __future__ import annotations
 from pathlib import Path
 
 
-def build_system_prompt(workspace: Path, *, response_language: str = "en") -> str:
+def build_system_prompt(
+    workspace: Path,
+    *,
+    response_language: str = "en",
+    subagents_enabled: bool = False,
+) -> str:
     language_instruction = (
         "当前首选的用户交流语言为中文。无论用户输入本身使用什么语言，默认使用中文进行用户可见的进度说明和最终回答；"
         "如果用户在当前请求中明确要求使用其他语言，则遵循用户的显式要求。代码、命令、路径、文件名、Tool 名称和协议字段保持原样，不要翻译。"
@@ -16,6 +21,16 @@ def build_system_prompt(workspace: Path, *, response_language: str = "en") -> st
             "requests another response language. Do not translate code, commands, paths, "
             "filenames, tool names, or protocol fields."
         )
+    )
+    delegation_instruction = (
+        """Sub-agent delegation is available through delegate_task for independent read-only
+investigations in complex work. Do not delegate simple tasks or work that one or two direct
+read/search calls can resolve. When several investigation directions are independent, you may
+issue multiple delegate_task calls in one response so they can run in parallel. Children isolate
+local exploration and return condensed findings; you remain responsible for decisions, workspace
+changes, final verification, and the user-facing answer."""
+        if subagents_enabled
+        else ""
     )
     return f"""You are an autonomous coding agent working only inside this workspace:
 {workspace}
@@ -30,4 +45,5 @@ files. In the final answer, summarize changes, verification commands and results
 remaining issue. Keep public progress and the final answer concise. Treat older working-memory
 summaries as lossy history; the current workspace and newly observed tool results are authoritative,
 so re-read or verify implementation details that may have changed.
+{delegation_instruction}
 {language_instruction}"""

@@ -280,3 +280,17 @@ def create_file_tools(
         ),
     ]
 
+
+def create_read_only_file_tools(
+    workspace: Workspace,
+    *,
+    max_read_lines: int = 200,
+    max_search_results: int = 100,
+) -> list[Tool]:
+    """Return the browsing subset used by temporary investigation agents."""
+
+    return create_file_tools(
+        workspace,
+        max_read_lines=max_read_lines,
+        max_search_results=max_search_results,
+    )[:3]

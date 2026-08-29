@@ -24,6 +24,7 @@ _RUNTIME_METADATA_FIELDS = (
     "model",
     "reasoning_effort",
     "preferred_language",
+    "subagents_enabled",
     "pinned",
     "unread",
     "created_at",
@@ -47,6 +48,7 @@ class Session:
     model: str = "deepseek-v4-flash"
     reasoning_effort: str = "high"
     preferred_language: str = "zh"
+    subagents_enabled: bool = False
     pinned: bool = False
     unread: bool = False
     created_at: str = field(default_factory=_now)
@@ -69,6 +71,7 @@ class Session:
         preferred_language = payload.get("preferred_language", "zh")
         pinned = payload.get("pinned", False)
         unread = payload.get("unread", False)
+        subagents_enabled = payload.get("subagents_enabled", False)
         if not isinstance(transcript, list) or (context is not None and not isinstance(context, dict)):
             raise ValueError("Session conversation data is malformed")
         if preferred_language not in {"zh", "en"}:
@@ -77,6 +80,8 @@ class Session:
             pinned = False
         if not isinstance(unread, bool):
             unread = False
+        if not isinstance(subagents_enabled, bool):
+            subagents_enabled = False
         return cls(
             id=payload["id"],
             title=payload["title"],
@@ -84,6 +89,7 @@ class Session:
             model=payload["model"],
             reasoning_effort=payload["reasoning_effort"],
             preferred_language=preferred_language,
+            subagents_enabled=subagents_enabled,
             pinned=pinned,
             unread=unread,
             created_at=str(payload.get("created_at", _now())),
@@ -115,6 +121,7 @@ class SessionStore:
         model: str = "deepseek-v4-flash",
         reasoning_effort: str = "high",
         preferred_language: str = "zh",
+        subagents_enabled: bool = False,
     ) -> Session:
         resolved = Path(workspace).expanduser().resolve()
         if not resolved.is_dir():
@@ -126,6 +133,7 @@ class SessionStore:
             model=model,
             reasoning_effort=reasoning_effort,
             preferred_language=(preferred_language if preferred_language in {"zh", "en"} else "zh"),
+            subagents_enabled=bool(subagents_enabled),
         )
         self.save(session)
         return session
@@ -163,6 +171,8 @@ class SessionStore:
                 raise ValueError("Unsupported preferred language")
             if not isinstance(session.pinned, bool) or not isinstance(session.unread, bool):
                 raise ValueError("Session flags must be boolean")
+            if not isinstance(session.subagents_enabled, bool):
+                raise ValueError("Sub-agent setting must be boolean")
             self._save_locked(session)
             return session
 

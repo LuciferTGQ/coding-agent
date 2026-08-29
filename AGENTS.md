@@ -26,7 +26,10 @@ Maintain these invariants:
   under `~/.nju-coding-agent`, never in the repository or selected workspace.
 - Keep model and tool work off the Qt main thread. Cancellation is cooperative at safe agent/tool
   boundaries and must not create an assistant tool call without all matching tool results.
-- Execute multiple tool calls sequentially and return malformed calls or tool failures to the model.
+- Execute ordinary and mixed tool calls sequentially. Only a pure `delegate_task` batch may run
+  concurrently (maximum four); preserve original call order and return every result to the model.
+- Temporary child agents remain read-only, receive fresh context, cannot delegate recursively, and
+  return only condensed findings to the parent. Workspace changes and verification stay with Main.
 - A successful write or edit requires execution-based verification, or one explicit explanation that
   no meaningful automated verification is available.
 - `shell=False`, time/output bounds, command filtering, and secret filtering are safeguards, not a
