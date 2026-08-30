@@ -34,7 +34,19 @@ ToolRegistry → Workspace / local subprocess
 
 `AgentRunner` 仍只负责编排。桌面层通过 `SessionRuntime` 复用同一 Harness，并将完整 UI transcript 与有预算的 provider context 分开持久化。模型适配、上下文、工具解析和环境操作分属不同模块，因此可以用 FakeModel 和临时 Workspace 分别测试。更完整的数据流和取舍见 [架构文档](docs/architecture.md)。
 
-## 安装
+## Windows 打包版
+
+不需要配置 Python 的 Windows 用户可以从 [GitHub Releases](https://github.com/LuciferTGQ/coding-agent/releases/latest) 下载 `CodingAgent-windows-x64.zip`：
+
+1. 完整解压 ZIP；
+2. 运行解压目录中的 `CodingAgent.exe`；
+3. 在首次调用模型前按下文配置 `DEEPSEEK_API_KEY`。
+
+打包版与 `python start_gui.py` 是同一份 Coding Agent 实现的两种分发形式，共用 Agent Loop、Tools、Context、Session 和 Sub-Agent 代码。默认配置下，同一个 Windows 用户的两种启动方式都会读取 `~/.nju-coding-agent`，因此可以在源码版创建 Session，关闭后用 EXE 继续，也可以反向切换。不要同时用多个进程修改同一个 Session；Session Store 不提供跨进程事务一致性。
+
+`CodingAgent.exe` 所在目录不是 Agent Workspace。应用可以放在任意普通目录，实际项目目录在 GUI 新建对话时单独选择和授权；Release 不包含示例 Workspace、用户 Session 或本地凭据。
+
+## 源码安装
 
 需要 Python 3.11 或更高版本。
 
@@ -48,11 +60,55 @@ macOS/Linux 上使用 `source .venv/bin/activate` 激活虚拟环境。
 
 ## API 配置
 
-设置 DeepSeek API Key：
+推荐通过环境变量设置 DeepSeek API Key。以下命令中的值都是占位符。
+
+### PowerShell
+
+仅对当前 PowerShell 窗口生效：
 
 ```powershell
-$env:DEEPSEEK_API_KEY = "your_api_key_here"
+$env:DEEPSEEK_API_KEY="your_api_key_here"
 ```
+
+写入当前 Windows 用户环境变量：
+
+```powershell
+[Environment]::SetEnvironmentVariable(
+    "DEEPSEEK_API_KEY",
+    "your_api_key_here",
+    "User"
+)
+```
+
+持久设置后请重新启动应用或终端。
+
+### CMD
+
+仅对当前 CMD 窗口生效：
+
+```cmd
+set DEEPSEEK_API_KEY=your_api_key_here
+```
+
+写入当前 Windows 用户环境变量：
+
+```cmd
+setx DEEPSEEK_API_KEY "your_api_key_here"
+```
+
+`setx` 不会更新已经打开的进程；请重新启动应用或终端。
+
+### Bash / Git Bash
+
+```bash
+export DEEPSEEK_API_KEY="your_api_key_here"
+```
+
+需要长期使用时，可将同一 `export` 命令加入对应 shell profile。
+
+### 本地 fallback
+
+如果环境变量未设置，Config 仍会尝试读取**当前工作目录**下未跟踪的 `api.txt`。这是源码开发 fallback：环境变量优先，`api.txt` 已由 `.gitignore` 保护且不应提交或放入 Release。直接双击打包版时工作目录可能随启动方式变化，因此 EXE 用户应使用环境变量。
 
 可选设置：
 
