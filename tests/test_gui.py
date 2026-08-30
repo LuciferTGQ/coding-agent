@@ -3,13 +3,14 @@ from __future__ import annotations
 import os
 import json
 from pathlib import Path
+import sys
 from threading import Event, Lock
 import time
 from typing import Sequence
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QCoreApplication, QEvent, Qt
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QFileDialog
 
@@ -19,7 +20,7 @@ import coding_agent.gui.app as gui_app
 from coding_agent.gui.app import MainWindow
 from coding_agent.gui.settings import AppSettings, SettingsStore
 from coding_agent.gui.sidebar import SessionRow
-from coding_agent.gui.widgets import MessageBubble
+from coding_agent.gui.widgets import ConversationView, MessageBubble
 from coding_agent.sessions import SessionStore
 from coding_agent.session_runtime import SessionRuntime as RealSessionRuntime
 
@@ -287,6 +288,25 @@ def test_long_user_and_markdown_messages_expand_without_inner_scroll(tmp_path: P
         assert bubble.body.height() >= expected
         assert bubble.body.geometry().bottom() <= bubble.contentsRect().bottom()
     window.close()
+    app.processEvents()
+
+
+def test_delayed_scroll_does_not_access_deleted_transcript_widget(monkeypatch) -> None:
+    app = _app()
+    view = ConversationView()
+    view.show()
+    callback_errors: list[tuple] = []
+    monkeypatch.setattr(sys, "excepthook", lambda *args: callback_errors.append(args))
+
+    view.add_status("old transcript")
+    app.processEvents()
+    view.clear_transcript()
+    QCoreApplication.sendPostedEvents(None, QEvent.DeferredDelete)
+    for _ in range(3):
+        app.processEvents()
+
+    assert callback_errors == []
+    view.close()
     app.processEvents()
 
 

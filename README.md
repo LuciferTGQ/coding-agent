@@ -169,15 +169,6 @@ python scripts/live_smoke.py
 
 该脚本验证 streaming thinking、tool call、本地 tool result 与下一轮 final response，不输出 reasoning 原文或 API 凭据。
 
-## 设计参考
-
-- [DeepSeek Thinking Mode](https://api-docs.deepseek.com/guides/thinking_mode/)
-- [DeepSeek Tool Calls](https://api-docs.deepseek.com/guides/tool_calls/)
-- [SWE-agent: Agent-Computer Interfaces](https://arxiv.org/abs/2405.15793)
-- [Anthropic: Building effective agents](https://www.anthropic.com/engineering/building-effective-agents)
-- [OpenAI: Unrolling the agent loop](https://openai.com/index/unrolling-the-codex-agent-loop/)
-- [Aider repository map](https://aider.chat/docs/repomap.html)
-
 ## 已知限制
 
 - 目前只实现 DeepSeek Chat Completions provider，桌面模型列表只提供已按该协议验证的 `deepseek-v4-flash`。

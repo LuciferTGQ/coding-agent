@@ -261,10 +261,12 @@ class ConversationView(QScrollArea):
         self._assistant = None
 
     def _scroll_bottom(self) -> None:
-        item = self.layout.itemAt(self.layout.count() - 1)
-        widget = item.widget() if item else None
-        if widget is not None:
-            def scroll(target: QWidget = widget) -> None:
+        if self.layout.count():
+            def scroll() -> None:
+                item = self.layout.itemAt(self.layout.count() - 1)
+                target = item.widget() if item else None
+                if target is None:
+                    return
                 self.verticalScrollBar().setValue(
                     min(self.verticalScrollBar().maximum(), target.geometry().top())
                 )
