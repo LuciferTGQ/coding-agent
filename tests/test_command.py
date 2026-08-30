@@ -66,25 +66,48 @@ def test_command_cwd_escape_and_shell_wrapper_are_blocked(tmp_path: Path) -> Non
 
 
 def test_dangerous_git_history_commands_are_blocked(tmp_path: Path) -> None:
-    result = _run(tmp_path, ["git", "reset", "--hard"])
-    assert not result.ok and "blocked" in result.message.lower()
+    commands = [
+        ["git", "reset", "--hard"],
+        ["git", "push", "--force-with-lease=main", "origin", "main"],
+        ["git", "push", "origin", "+main"],
+    ]
+
+    for command in commands:
+        result = _run(tmp_path, command)
+        assert not result.ok and "blocked" in result.message.lower()
 
 
 def test_subprocess_environment_filters_agent_credentials(
     tmp_path: Path, monkeypatch
 ) -> None:
-    monkeypatch.setenv("DEEPSEEK_API_KEY", "dummy-secret")
+    credentials = {
+        "DEEPSEEK_API_KEY": "deepseek-secret",
+        "AWS_ACCESS_KEY_ID": "aws-secret",
+        "GOOGLE_APPLICATION_CREDENTIALS": "credential-path",
+        "SERVICE_PRIVATE_KEY": "private-secret",
+        "SSH_AUTH_SOCK": "agent-socket",
+    }
+    for name, value in credentials.items():
+        monkeypatch.setenv(name, value)
+    monkeypatch.setenv("CODING_AGENT_TEST_VISIBLE", "visible-value")
     result = _run(
         tmp_path,
         [
             sys.executable,
             "-c",
-            "import os; print(os.environ.get('DEEPSEEK_API_KEY', 'missing'))",
+            (
+                "import json, os; "
+                "names = ['DEEPSEEK_API_KEY', 'AWS_ACCESS_KEY_ID', "
+                "'GOOGLE_APPLICATION_CREDENTIALS', 'SERVICE_PRIVATE_KEY', "
+                "'SSH_AUTH_SOCK', 'CODING_AGENT_TEST_VISIBLE']; "
+                "print(json.dumps({name: os.environ.get(name, 'missing') for name in names}))"
+            ),
         ],
     )
     assert result.ok
     assert "missing" in result.message
-    assert "dummy-secret" not in result.message
+    assert "visible-value" in result.message
+    assert all(value not in result.message for value in credentials.values())
 
 
 def test_output_is_truncated(tmp_path: Path) -> None:

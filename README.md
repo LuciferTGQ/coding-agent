@@ -145,6 +145,7 @@ Working memory 是有损历史，不是代码事实源。模型必须以当前 W
 - 文件路径和命令 cwd 统一经过 `Workspace.resolve_path()`，拒绝绝对路径、`..` 越界和可解析的 symlink escape。
 - 文件浏览、读取和搜索会隐藏或拒绝已配置的凭据文件。
 - 子进程环境过滤 `*_API_KEY`、`*_TOKEN`、`*_SECRET` 和 `*_PASSWORD` 等变量。
+- Harness 生成的 System Prompt 不包含本机 Workspace 绝对路径；Tool 路径保持为 Workspace 相对路径。
 - 命令不经过 shell，并拦截 shell wrapper、危险系统命令和常见的破坏性 Git 操作。
 - API 调用对连接失败、超时、429 和 5xx 进行有限重试，明确的不可恢复 4xx 会快速失败。
 

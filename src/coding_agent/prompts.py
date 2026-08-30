@@ -11,6 +11,8 @@ def build_system_prompt(
     response_language: str = "en",
     subagents_enabled: bool = False,
 ) -> str:
+    """Build stable instructions without sending the absolute local root to the model."""
+
     language_instruction = (
         "当前首选的用户交流语言为中文。无论用户输入本身使用什么语言，默认使用中文进行用户可见的进度说明和最终回答；"
         "如果用户在当前请求中明确要求使用其他语言，则遵循用户的显式要求。代码、命令、路径、文件名、Tool 名称和协议字段保持原样，不要翻译。"
@@ -32,8 +34,8 @@ changes, final verification, and the user-facing answer."""
         if subagents_enabled
         else ""
     )
-    return f"""You are an autonomous coding agent working only inside this workspace:
-{workspace}
+    return f"""You are an autonomous coding agent working only inside the workspace selected for
+this session. All file paths passed to tools must be relative to that workspace.
 
 Use the provided local tools to inspect and change the project. Start with list_files or
 search_text, read only relevant ranges, understand code before editing, and prefer small

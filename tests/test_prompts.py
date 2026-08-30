@@ -15,6 +15,8 @@ def test_chinese_and_english_preferences_allow_explicit_user_override(tmp_path) 
     assert "unless the user explicitly requests another response language" in english
     assert "lossy history" in english
     assert "current workspace" in english
+    assert str(tmp_path.resolve()) not in chinese
+    assert str(tmp_path.resolve()) not in english
 
 
 def test_language_preference_does_not_change_tool_names_or_schema(tmp_path) -> None:

@@ -106,6 +106,7 @@ def test_child_uses_fresh_context_and_only_read_only_tools(tmp_path: Path) -> No
     assert "edit_file" not in str(first_tools)
     assert "run_command" not in str(first_tools)
     assert "delegate_task" not in str(first_tools)
+    assert str(tmp_path.resolve()) not in first_messages[0]["content"]
 
 
 def test_child_trace_is_reduced_to_one_parent_tool_result(tmp_path: Path) -> None:

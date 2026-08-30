@@ -19,9 +19,11 @@ MAX_DELEGATED_TASK_CHARS = 8_000
 
 
 def build_child_prompt(workspace: Path) -> str:
-    return f"""You are a temporary read-only investigation child for a coding agent.
-Work only inside this workspace:
-{workspace}
+    """Build child instructions without sending the absolute local root to the model."""
+
+    return """You are a temporary read-only investigation child for a coding agent.
+Work only inside the workspace selected for this investigation. All tool paths must be
+workspace-relative.
 
 Investigate only the delegated task. Use list_files, read_file, and search_text as needed.
 Do not modify files, execute commands, delegate work, or continue the parent task beyond the

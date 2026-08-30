@@ -33,7 +33,8 @@ Runtime composition                     ↓
 ```
 
 `runtime.py` 是 CLI composition root，`session_runtime.py` 是持久桌面会话的 composition root。Config 的 Key 只传入 `DeepSeekChatClient`；
-AgentRunner、ContextManager、Workspace、Registry 和 Tools 都拿不到凭据。
+AgentRunner、ContextManager、Workspace、Registry 和 Tools 都拿不到凭据。Harness 构造的 Main/Child
+system prompt 只描述 Workspace 相对边界，不把本机绝对根路径发送给模型。
 
 ## 3. 模块职责
 
@@ -111,7 +112,7 @@ GUI 的每个 Session 保存独立 `subagents_enabled` metadata，旧 Session �
 
 Child 的 delegated task 是唯一 user message，Main 完整历史不会复制进去。Child 内部的 list/read/search trajectory 只存在于临时 Context；Main 最终只收到一个 bounded `ToolResult`，内容为 Child final findings 与 status/steps。这样大量局部探索不会污染 Parent model context。Main 仍负责决策、文件修改、Verification Guard 和用户回答。
 
-纯 delegation batch 使用 `ThreadPoolExecutor(max_workers=min(4, calls))` 真正并行；5 个以上 call 会在池内排队而不会创建更多线程。future 全部提交后按原 call 列表读取结果，因此 completion timing 不改变 provider 顺序。Registry 把单个 Child 异常转成该 call 的失败结果，sibling 仍可完成。Parent Stop 的同一个 cooperative flag 传入所有 Child；网络调用无法强制中断，但返回后 Child 会在模型/工具安全边界停止。这里没有 thread terminate。
+纯 delegation batch 使用 `ThreadPoolExecutor(max_workers=min(4, calls))` 真正并行；5 个以上 call 会在池内排队而不会创建更多线程。Runner 通过 `as_completed()` 在每个 Child 实际结束时立即按 call id 发出 Tool Result 事件，同时把结果存回原始 index；Main 等待整批结束后，仍按 provider 的原 call 顺序把完整 Tool Results 写入 Context。Registry 把单个 Child 异常转成该 call 的失败结果，sibling 仍可完成。Parent Stop 的同一个 cooperative flag 传入所有 Child；网络调用无法强制中断，但返回后 Child 会在模型/工具安全边界停止。这里没有 thread terminate。
 
 ### ContextManager
 

@@ -40,17 +40,36 @@ BLOCKED_EXECUTABLES = frozenset(
     }
 )
 
+SENSITIVE_ENVIRONMENT_MARKERS = (
+    "API_KEY",
+    "ACCESS_KEY",
+    "PRIVATE_KEY",
+    "CREDENTIAL",
+    "PASSWORD",
+    "PASSWD",
+    "SECRET",
+    "TOKEN",
+)
+SENSITIVE_ENVIRONMENT_NAMES = frozenset(
+    {
+        "DOCKER_AUTH_CONFIG",
+        "GIT_ASKPASS",
+        "KUBECONFIG",
+        "NETRC",
+        "SSH_ASKPASS",
+        "SSH_AUTH_SOCK",
+    }
+)
+
 
 def _filtered_environment() -> dict[str, str]:
     filtered: dict[str, str] = {}
     for name, value in os.environ.items():
         upper = name.upper()
         secret = (
-            upper.endswith("_TOKEN")
-            or upper.endswith("_SECRET")
-            or upper.endswith("_PASSWORD")
-            or upper.endswith("_API_KEY")
-            or upper in {"OPENAI_API_KEY", "ANTHROPIC_API_KEY", "DEEPSEEK_API_KEY"}
+            upper in SENSITIVE_ENVIRONMENT_NAMES
+            or upper.endswith(("_KEY", "_KEY_ID", "_PAT"))
+            or any(marker in upper for marker in SENSITIVE_ENVIRONMENT_MARKERS)
         )
         if not secret:
             filtered[name] = value
@@ -70,7 +89,14 @@ def _safety_error(argv: list[str]) -> str | None:
             return "Command blocked: git clean can destructively remove workspace files"
         if "reset" in lowered and "--hard" in lowered:
             return "Command blocked: git reset --hard rewrites workspace state"
-        if "push" in lowered and any(part in {"-f", "--force", "--force-with-lease"} for part in lowered):
+        force_push = any(
+            part in {"-f", "--force", "--force-with-lease", "--force-if-includes", "--mirror"}
+            or part.startswith("--force=")
+            or part.startswith("--force-with-lease=")
+            or part.startswith("+")
+            for part in lowered
+        )
+        if "push" in lowered and force_push:
             return "Command blocked: force-pushing history is not allowed"
         if "rebase" in lowered or "--amend" in lowered:
             return "Command blocked: rewriting Git history is not allowed"
