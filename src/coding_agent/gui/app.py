@@ -57,7 +57,18 @@ def start_replacement_gui() -> bool:
     if not getattr(sys, "frozen", False) and launcher.suffix.casefold() == ".py":
         arguments = [str(launcher), *sys.argv[1:]]
     elif getattr(sys, "frozen", False):
-        result = QProcess.startDetached(sys.executable, sys.argv[1:], str(Path.cwd()))
+        reset_name = "PYINSTALLER_RESET_ENVIRONMENT"
+        previous_reset = os.environ.get(reset_name)
+        os.environ[reset_name] = "1"
+        try:
+            result = QProcess.startDetached(
+                sys.executable, sys.argv[1:], str(Path.cwd())
+            )
+        finally:
+            if previous_reset is None:
+                os.environ.pop(reset_name, None)
+            else:
+                os.environ[reset_name] = previous_reset
         return result[0] if isinstance(result, tuple) else bool(result)
     else:
         arguments = ["-m", "coding_agent.gui", *sys.argv[1:]]

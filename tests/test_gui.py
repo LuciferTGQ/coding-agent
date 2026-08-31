@@ -809,6 +809,27 @@ def test_language_restart_is_deferred_while_tasks_run(
     app.processEvents()
 
 
+def test_frozen_restart_resets_pyinstaller_environment_for_child(
+    tmp_path: Path, monkeypatch
+) -> None:
+    observed: list[str | None] = []
+    monkeypatch.setattr(gui_app.sys, "frozen", True, raising=False)
+    monkeypatch.setattr(gui_app.sys, "executable", str(tmp_path / "CodingAgent.exe"))
+    monkeypatch.delenv("PYINSTALLER_RESET_ENVIRONMENT", raising=False)
+    monkeypatch.setattr(
+        gui_app.QProcess,
+        "startDetached",
+        lambda *args: observed.append(
+            os.environ.get("PYINSTALLER_RESET_ENVIRONMENT")
+        )
+        or (True, 1234),
+    )
+
+    assert gui_app.start_replacement_gui() is True
+    assert observed == ["1"]
+    assert "PYINSTALLER_RESET_ENVIRONMENT" not in os.environ
+
+
 def test_language_setting_can_restart_now_or_stay_until_later(
     tmp_path: Path, monkeypatch
 ) -> None:
