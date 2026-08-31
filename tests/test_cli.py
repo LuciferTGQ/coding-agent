@@ -5,6 +5,7 @@ from pathlib import Path
 import pytest
 
 from coding_agent import cli, runtime
+import coding_agent.config as config_module
 from coding_agent.config import Config
 from coding_agent.llm import AssistantResponse
 
@@ -23,6 +24,7 @@ def test_missing_api_configuration_fails_without_exposing_secret(
 ) -> None:
     monkeypatch.chdir(tmp_path)
     monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
+    monkeypatch.setattr(config_module, "application_directory", lambda: tmp_path)
 
     with pytest.raises(SystemExit) as caught:
         cli.main(["--workspace", str(tmp_path), "inspect"])
@@ -31,6 +33,13 @@ def test_missing_api_configuration_fails_without_exposing_secret(
     error = capsys.readouterr().err
     assert "DEEPSEEK_API_KEY" in error
     assert "Traceback" not in error
+
+
+def test_cli_accepts_both_supported_models() -> None:
+    parser = cli.build_parser()
+
+    for model in ("deepseek-v4-flash", "deepseek-v4-pro"):
+        assert parser.parse_args(["--model", model, "inspect"]).model == model
 
 
 class FinalModel:

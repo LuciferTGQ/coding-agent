@@ -54,6 +54,20 @@ def test_session_store_crud_and_restart(tmp_path: Path) -> None:
     assert restarted.list() == []
 
 
+def test_session_models_round_trip_independently_across_restart(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    root = tmp_path / "model-state"
+    store = SessionStore(root)
+    flash = store.create(workspace=workspace, title="Flash")
+    pro = store.create(workspace=workspace, title="Pro", model="deepseek-v4-pro")
+
+    restarted = SessionStore(root)
+
+    assert restarted.load(flash.id).model == "deepseek-v4-flash"
+    assert restarted.load(pro.id).model == "deepseek-v4-pro"
+
+
 def test_optional_sidebar_metadata_is_backward_compatible(tmp_path: Path) -> None:
     workspace = tmp_path / "workspace"
     workspace.mkdir()
@@ -544,3 +558,62 @@ def test_subagent_tool_availability_follows_independent_session_setting(
     assert "delegate_task" in enabled_model.tool_names[0]
     assert store.load(disabled.id).subagents_enabled is False
     assert store.load(enabled.id).subagents_enabled is True
+
+
+def test_runtime_and_child_factory_use_session_pro_model(tmp_path: Path) -> None:
+    class ParentModel:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def complete(self, *, messages: Sequence[dict], tools: Sequence[dict]) -> AssistantResponse:
+            self.calls += 1
+            if self.calls == 1:
+                call = ToolCall("delegate-1", "delegate_task", '{"task":"inspect files"}')
+                return AssistantResponse(
+                    content="",
+                    tool_calls=(call,),
+                    provider_message={
+                        "role": "assistant",
+                        "content": "",
+                        "tool_calls": [
+                            {
+                                "id": call.id,
+                                "type": "function",
+                                "function": {
+                                    "name": call.name,
+                                    "arguments": call.arguments,
+                                },
+                            }
+                        ],
+                    },
+                )
+            return AssistantResponse(
+                content="done",
+                tool_calls=(),
+                provider_message={"role": "assistant", "content": "done"},
+            )
+
+    child = FakeModel(["No issues found."])
+    parent = ParentModel()
+    models = [parent, child]
+    captured_models: list[str] = []
+
+    def factory(config):
+        captured_models.append(config.model)
+        return models.pop(0)
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    store = SessionStore(tmp_path / "pro-runtime-state")
+    session = store.create(
+        workspace=workspace,
+        model="deepseek-v4-pro",
+        subagents_enabled=True,
+    )
+
+    result = SessionRuntime(store, model_factory=factory).run_turn(
+        session.id, "inspect", stream=False
+    )
+
+    assert result.status == "completed"
+    assert captured_models == ["deepseek-v4-pro", "deepseek-v4-pro"]

@@ -40,7 +40,7 @@ system prompt 只描述 Workspace 相对边界，不把本机绝对根路径发�
 
 ### Config 与 CLI
 
-`config.py` 负责读取和校验模型、Workspace 与 Harness 设置。dataclass 将 `api_key` 设为 `repr=False`；凭据只会从 Config 传入 `DeepSeekChatClient`。`cli.py` 处理参数和退出码，`runtime.py` 负责构造各层。这个分工防止凭据和环境操作渗入 Agent 状态。
+`config.py` 负责读取和校验模型、Workspace 与 Harness 设置。API Key 优先来自 `DEEPSEEK_API_KEY`；未设置时读取应用程序目录中的 `api.txt`。源码运行会定位包含 `start_gui.py` 的项目目录，冻结运行则使用 `sys.executable` 所在目录。dataclass 将 `api_key` 设为 `repr=False`；凭据只会从 Config 传入 `DeepSeekChatClient`。`cli.py` 处理参数和退出码，`runtime.py` 负责构造各层。这个分工防止凭据和环境操作渗入 Agent 状态。
 
 ### DeepSeekChatClient
 
@@ -147,6 +147,8 @@ GUI 文案由一个集中维护的 `zh/en` 映射提供，不使用额外 locale
 每个 Session 固定绑定一个 Workspace。已有历史时切换目录会创建新 Session，从结构上避免项目 A 的工具结果进入项目 B 的模型上下文。附件不会绕过这条边界：内部文件只记录相对路径；外部文件必须经确认复制进 Workspace，随后仍通过 `Workspace.resolve_path()` 和文件工具读取。
 
 Qt 主线程只处理窗口和控件。`AgentTaskManager` 维护 `workers[session_id]`；每个 `AgentWorker` 在自己的 `QThread` 中运行一套既有 `SessionRuntime → AgentRunner → ToolRegistry → Workspace`。Manager 只把 queued signals 包装为 `(session_id, event/result/error)`，不参与 prompt、reasoning、Tool Calling 或 Context 裁剪。前台 Session 实时渲染自己的 event，后台 event 只更新对应 Sidebar 状态；切回时从该 Session 的持久 transcript 恢复。Parallel GUI Sessions 是多个持久 Parent 各自运行；Parallel Sub-Agent 则是单个 Parent turn 内部的临时只读 children，两者生命周期与状态层级不同。
+
+模型选择同样属于 Session 状态。GUI 将 `deepseek-v4-flash` 或 `deepseek-v4-pro` 写入 `Session.model`，`SessionRuntime` 在每个 turn 开始时据此构造 `Config` 和 `DeepSeekChatClient`；同一 turn 的临时 Child 通过同一个 Config 创建客户端，因此与 Main 使用相同模型。运行期间 GUI 锁定模型控件，切换只影响后续 turn，不改写已有 transcript 或 model context。
 
 同一个 Session 同时最多有一个 Worker，不实现消息队列。不同 Session 可以并发，Stop 按 session_id 设置各自的协作式 cancellation flag；关闭应用时 `stop_all()` 请求所有 Worker 在安全边界停止，绝不调用 `QThread.terminate()`。多个运行任务存在时，语言设置可以保存，但立即重启被推迟。
 

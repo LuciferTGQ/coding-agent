@@ -12,6 +12,8 @@ import time
 from typing import Any
 from uuid import uuid4
 
+from coding_agent.config import DEFAULT_MODEL, SUPPORTED_MODELS
+
 
 JsonObject = dict[str, Any]
 SCHEMA_VERSION = 1
@@ -45,7 +47,7 @@ class Session:
     id: str
     title: str
     workspace: str
-    model: str = "deepseek-v4-flash"
+    model: str = DEFAULT_MODEL
     reasoning_effort: str = "high"
     preferred_language: str = "zh"
     subagents_enabled: bool = False
@@ -76,6 +78,9 @@ class Session:
             raise ValueError("Session conversation data is malformed")
         if preferred_language not in {"zh", "en"}:
             preferred_language = "zh"
+        model = payload["model"]
+        if model not in SUPPORTED_MODELS:
+            model = DEFAULT_MODEL
         if not isinstance(pinned, bool):
             pinned = False
         if not isinstance(unread, bool):
@@ -86,7 +91,7 @@ class Session:
             id=payload["id"],
             title=payload["title"],
             workspace=payload["workspace"],
-            model=payload["model"],
+            model=model,
             reasoning_effort=payload["reasoning_effort"],
             preferred_language=preferred_language,
             subagents_enabled=subagents_enabled,
@@ -118,7 +123,7 @@ class SessionStore:
         *,
         workspace: str | Path,
         title: str = "New conversation",
-        model: str = "deepseek-v4-flash",
+        model: str = DEFAULT_MODEL,
         reasoning_effort: str = "high",
         preferred_language: str = "zh",
         subagents_enabled: bool = False,
@@ -126,6 +131,8 @@ class SessionStore:
         resolved = Path(workspace).expanduser().resolve()
         if not resolved.is_dir():
             raise ValueError(f"Workspace is not a directory: {resolved}")
+        if model not in SUPPORTED_MODELS:
+            raise ValueError("Unsupported model")
         session = Session(
             id=uuid4().hex,
             title=title.strip() or "New conversation",
@@ -169,6 +176,8 @@ class SessionStore:
             session.title = session.title.strip()
             if session.preferred_language not in {"zh", "en"}:
                 raise ValueError("Unsupported preferred language")
+            if session.model not in SUPPORTED_MODELS:
+                raise ValueError("Unsupported model")
             if not isinstance(session.pinned, bool) or not isinstance(session.unread, bool):
                 raise ValueError("Session flags must be boolean")
             if not isinstance(session.subagents_enabled, bool):

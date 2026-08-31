@@ -5,6 +5,11 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 import os
 from pathlib import Path
+import sys
+
+
+DEFAULT_MODEL = "deepseek-v4-flash"
+SUPPORTED_MODELS = (DEFAULT_MODEL, "deepseek-v4-pro")
 
 
 class ConfigurationError(ValueError):
@@ -21,6 +26,19 @@ def _positive_int(name: str, value: str | int) -> int:
     return parsed
 
 
+def application_directory() -> Path:
+    """Return the directory users place application-level files beside."""
+
+    if getattr(sys, "frozen", False):
+        return Path(sys.executable).resolve().parent
+
+    module_path = Path(__file__).resolve()
+    for candidate in module_path.parents:
+        if (candidate / "start_gui.py").is_file():
+            return candidate
+    return Path(sys.argv[0]).expanduser().resolve().parent
+
+
 @dataclass(frozen=True, slots=True)
 class Config:
     """Validated settings shared by the CLI and harness.
@@ -32,7 +50,7 @@ class Config:
     api_key: str = field(repr=False)
     workspace: Path
     base_url: str = "https://api.deepseek.com"
-    model: str = "deepseek-v4-flash"
+    model: str = DEFAULT_MODEL
     reasoning_effort: str = "high"
     thinking_enabled: bool = True
     max_steps: int = 24
@@ -63,7 +81,11 @@ class Config:
             raise ConfigurationError(f"Workspace is not a directory: {root}")
 
         api_key = os.environ.get("DEEPSEEK_API_KEY", "").strip()
-        credential_path = Path(key_file) if key_file is not None else Path.cwd() / "api.txt"
+        credential_path = (
+            Path(key_file).expanduser()
+            if key_file is not None
+            else application_directory() / "api.txt"
+        )
         if not api_key and credential_path.is_file():
             try:
                 api_key = credential_path.read_text(encoding="utf-8").strip()
@@ -71,19 +93,26 @@ class Config:
                 raise ConfigurationError(f"Could not read local credential file: {credential_path}") from exc
         if require_api_key and not api_key:
             raise ConfigurationError(
-                "DeepSeek API key is missing. Set the DEEPSEEK_API_KEY environment variable."
+                "DeepSeek API key is missing. Set DEEPSEEK_API_KEY or create api.txt "
+                "in the application directory."
             )
 
         effort = reasoning_effort or os.environ.get("DEEPSEEK_REASONING_EFFORT", "high")
         if effort not in {"low", "high", "max"}:
             raise ConfigurationError("reasoning effort must be one of: low, high, max")
 
+        selected_model = model or os.environ.get("DEEPSEEK_MODEL", DEFAULT_MODEL)
+        if selected_model not in SUPPORTED_MODELS:
+            raise ConfigurationError(
+                f"model must be one of: {', '.join(SUPPORTED_MODELS)}"
+            )
+
         configured_steps = max_steps if max_steps is not None else os.environ.get("CODING_AGENT_MAX_STEPS", "24")
         return cls(
             api_key=api_key,
             workspace=root,
             base_url=os.environ.get("DEEPSEEK_BASE_URL", "https://api.deepseek.com").rstrip("/"),
-            model=model or os.environ.get("DEEPSEEK_MODEL", "deepseek-v4-flash"),
+            model=selected_model,
             reasoning_effort=effort,
             thinking_enabled=thinking_enabled,
             max_steps=_positive_int("max steps", configured_steps),

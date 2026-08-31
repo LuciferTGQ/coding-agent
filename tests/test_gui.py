@@ -43,7 +43,10 @@ def test_window_loads_persistent_session_and_renders_event_cards(tmp_path: Path)
     assert window.model_combo.currentText() == "deepseek-v4-flash"
     assert window.new_button.text() == "＋  新建对话"
     assert window.settings_button.text() == "设置"
-    assert window.model_combo.count() == 1
+    assert [
+        window.model_combo.itemText(index)
+        for index in range(window.model_combo.count())
+    ] == ["deepseek-v4-flash", "deepseek-v4-pro"]
     assert [window.effort_combo.itemText(i) for i in range(window.effort_combo.count())] == [
         "low",
         "high",
@@ -64,6 +67,33 @@ def test_window_loads_persistent_session_and_renders_event_cards(tmp_path: Path)
 
     assert "c1" in window.conversation._tools
     assert "已完成" in window.conversation._tools["c1"].toggle.text()
+    window.close()
+    app.processEvents()
+
+
+def test_model_selection_persists_per_session_and_locks_while_running(
+    tmp_path: Path,
+) -> None:
+    app = _app()
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    store = SessionStore(tmp_path / "model-state")
+    flash = store.create(workspace=workspace, title="Flash")
+    pro = store.create(workspace=workspace, title="Pro", model="deepseek-v4-pro")
+    window = MainWindow(store)
+
+    window.load_session(pro.id)
+    assert window.model_combo.currentText() == "deepseek-v4-pro"
+    window.load_session(flash.id)
+    assert window.model_combo.currentText() == "deepseek-v4-flash"
+
+    window.model_combo.setCurrentText("deepseek-v4-pro")
+    assert store.load(flash.id).model == "deepseek-v4-pro"
+
+    window.task_manager.workers[flash.id] = object()
+    window._sync_controls()
+    assert not window.model_combo.isEnabled()
+    window.task_manager.workers.clear()
     window.close()
     app.processEvents()
 

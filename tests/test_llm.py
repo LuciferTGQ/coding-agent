@@ -42,14 +42,19 @@ class FakeCompletions:
         return outcome
 
 
-def _client(outcomes: list[Any], **kwargs: Any) -> tuple[DeepSeekChatClient, FakeCompletions]:
+def _client(
+    outcomes: list[Any],
+    *,
+    model_name: str = "deepseek-v4-flash",
+    **kwargs: Any,
+) -> tuple[DeepSeekChatClient, FakeCompletions]:
     completions = FakeCompletions(outcomes)
     sdk = SimpleNamespace(chat=SimpleNamespace(completions=completions))
     return (
         DeepSeekChatClient(
             api_key="test-key",
             base_url="https://example.invalid",
-            model="deepseek-v4-flash",
+            model=model_name,
             client=sdk,
             sleep=lambda _: None,
             **kwargs,
@@ -90,6 +95,17 @@ def test_multiple_tool_calls_keep_order() -> None:
     result = model.complete(messages=[], tools=[])
 
     assert [call.name for call in result.tool_calls] == ["first", "second"]
+
+
+def test_pro_model_is_sent_in_request_payload() -> None:
+    model, completions = _client(
+        [_response(content="done", reasoning="r", calls=[])],
+        model_name="deepseek-v4-pro",
+    )
+
+    model.complete(messages=[{"role": "user", "content": "hello"}], tools=[])
+
+    assert completions.requests[0]["model"] == "deepseek-v4-pro"
 
 
 def test_no_thinking_omits_effort() -> None:

@@ -32,7 +32,7 @@ ToolRegistry → Workspace / local subprocess
        └ optional delegate_task → bounded pool → isolated read-only Child Agent(s)
 ```
 
-`AgentRunner` 仍只负责编排。桌面层通过 `SessionRuntime` 复用同一 Harness，并将完整 UI transcript 与有预算的 provider context 分开持久化。模型适配、上下文、工具解析和环境操作分属不同模块，因此可以用 FakeModel 和临时 Workspace 分别测试。更完整的数据流和取舍见 [架构文档](docs/architecture.md)。
+`AgentRunner` 仍只负责编排。桌面层通过 `SessionRuntime` 复用同一 Harness，并将完整 UI transcript 与有预算的 provider context 分开持久化。模型适配、上下文、工具解析和环境操作分属不同模块。更完整的数据流和取舍见 [架构文档](docs/architecture.md)。
 
 ## Windows 打包版
 
@@ -40,11 +40,11 @@ ToolRegistry → Workspace / local subprocess
 
 1. 完整解压 ZIP；
 2. 运行解压目录中的 `CodingAgent.exe`；
-3. 在首次调用模型前按下文配置 `DEEPSEEK_API_KEY`。
+3. 在首次调用模型前按下文配置自己的 DeepSeek API Key。
 
 打包版与 `python start_gui.py` 是同一份 Coding Agent 实现的两种分发形式，共用 Agent Loop、Tools、Context、Session 和 Sub-Agent 代码。默认配置下，同一个 Windows 用户的两种启动方式都会读取 `~/.nju-coding-agent`，因此可以在源码版创建 Session，关闭后用 EXE 继续，也可以反向切换。不要同时用多个进程修改同一个 Session；Session Store 不提供跨进程事务一致性。
 
-`CodingAgent.exe` 所在目录不是 Agent Workspace。应用可以放在任意普通目录，实际项目目录在 GUI 新建对话时单独选择和授权；Release 不包含示例 Workspace、用户 Session 或本地凭据。
+`CodingAgent.exe` 所在目录不是 Agent Workspace。应用可以放在任意普通目录，实际项目目录在 GUI 新建对话时单独选择和授权。
 
 ## 源码安装
 
@@ -60,7 +60,9 @@ macOS/Linux 上使用 `source .venv/bin/activate` 激活虚拟环境。
 
 ## API 配置
 
-推荐通过环境变量设置 DeepSeek API Key。以下命令中的值都是占位符。
+使用 DeepSeek 服务需要配置自己的 API Key。以下命令中的值都是占位符。
+
+### 方式一：环境变量
 
 ### PowerShell
 
@@ -106,9 +108,13 @@ export DEEPSEEK_API_KEY="your_api_key_here"
 
 需要长期使用时，可将同一 `export` 命令加入对应 shell profile。
 
-### 本地 fallback
+### 方式二：本地配置文件
 
-如果环境变量未设置，Config 仍会尝试读取**当前工作目录**下未跟踪的 `api.txt`。这是源码开发 fallback：环境变量优先，`api.txt` 已由 `.gitignore` 保护且不应提交或放入 Release。直接双击打包版时工作目录可能随启动方式变化，因此 EXE 用户应使用环境变量。
+也可以在应用程序所在目录创建 `api.txt`，文件中单独填写自己的 DeepSeek API Key。源码方式启动时，将该文件与 `start_gui.py` 放在同一目录；Windows 打包版使用时，将该文件与 `CodingAgent.exe` 放在同一目录。
+
+若同时配置环境变量和 `api.txt`，环境变量优先。请妥善保管 API Key，不要将 API Key 或 `api.txt` 分享给他人。
+
+## 运行参数
 
 可选设置：
 
@@ -145,7 +151,7 @@ coding-agent-gui
 
 输入区提供每个 Session 独立保存的 **子代理** Toggle，默认关闭。开启后 Main 可以按需使用 `delegate_task`，并在一次纯 delegation batch 中并行启动最多 4 个临时只读 Child；简单任务不会被强制委派。Child 只获得 `list_files`、`read_file`、`search_text`，使用独立 Context 和 ModelClient，其内部探索不会进入 Main Context，只有最终 findings 作为原 call id 的 Tool Result 返回。修改 Workspace 和最终验证仍由 Main 完成。运行中的 Turn 使用启动时的开关快照。
 
-轻量设置弹窗提供界面语言、默认模型、默认思考强度和默认最大步骤。语言可选择中文或 English；保存语言变更后可以稍后应用，也可以安全启动新进程并立即重启。中文界面会要求模型除代码、命令、路径和必要技术标识外，默认使用中文交流。Tool 名称、JSON Schema 和 DeepSeek 协议字段不会被翻译。
+轻量设置弹窗提供界面语言、默认模型、默认思考强度和默认最大步骤。桌面端支持 `deepseek-v4-flash` 和 `deepseek-v4-pro`，默认使用 Flash；模型选择按 Session 保存，运行中的任务保持启动时模型不变，下一轮使用当前选择。语言可选择中文或 English；保存语言变更后可以稍后应用，也可以安全启动新进程并立即重启。中文界面会要求模型除代码、命令、路径和必要技术标识外，默认使用中文交流。Tool 名称、JSON Schema 和 DeepSeek 协议字段不会被翻译。
 
 快捷键：`Ctrl+N` 新建对话，`Ctrl+,` 打开设置，`Ctrl+Return` 发送消息。
 
@@ -227,7 +233,7 @@ python scripts/live_smoke.py
 
 ## 已知限制
 
-- 目前只实现 DeepSeek Chat Completions provider，桌面模型列表只提供已按该协议验证的 `deepseek-v4-flash`。
+- 目前只实现 DeepSeek Chat Completions provider，桌面端支持 `deepseek-v4-flash` 和 `deepseek-v4-pro`，不提供多 Provider 路由或自动选模。
 - Context soft budget 是序列化消息的近似字符预算，并非精确 token 计数；Rolling Summary 仍可能遗漏次要历史细节。
 - 当前没有 Repo Map、RAG、LSP 或长期协作式 Agent 拓扑；Sub-Agent 是无持久历史的临时只读调查对象。
 - Stop 是协作式边界停止，不会中断正在进行的网络请求或单个工具 handler。

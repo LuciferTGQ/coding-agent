@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Sequence
 
 from coding_agent import __version__
-from coding_agent.config import Config, ConfigurationError
+from coding_agent.config import SUPPORTED_MODELS, Config, ConfigurationError
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -18,7 +18,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("task", nargs="?", help="Natural-language programming task")
     parser.add_argument("--workspace", type=Path, default=Path.cwd(), help="Workspace root")
     parser.add_argument("--max-steps", type=int, help="Maximum model turns")
-    parser.add_argument("--model", help="DeepSeek model name")
+    parser.add_argument("--model", choices=SUPPORTED_MODELS, help="DeepSeek model name")
     parser.add_argument(
         "--reasoning-effort", choices=("low", "high", "max"), help="Thinking effort"
     )
@@ -49,4 +49,3 @@ def main(argv: Sequence[str] | None = None) -> int:
     from coding_agent.runtime import run_task
 
     return run_task(config=config, task=args.task, verbose=args.verbose)
-

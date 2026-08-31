@@ -7,17 +7,18 @@ import json
 import os
 from pathlib import Path
 
+from coding_agent.config import DEFAULT_MODEL, SUPPORTED_MODELS
 from coding_agent.gui.i18n import LANGUAGES
 
 
-MODELS = ("deepseek-v4-flash",)
+MODELS = SUPPORTED_MODELS
 REASONING_EFFORTS = ("low", "high", "max")
 
 
 @dataclass(frozen=True, slots=True)
 class AppSettings:
     language: str = "zh"
-    model: str = "deepseek-v4-flash"
+    model: str = DEFAULT_MODEL
     reasoning_effort: str = "high"
     max_steps: int = 24
 
