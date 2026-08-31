@@ -361,7 +361,8 @@ def test_gui_language_updates_stable_prompt_without_changing_protocol(tmp_path: 
 
     system = model.requests[0][0]
     assert system["role"] == "system"
-    assert "当前首选的用户交流语言为中文" in system["content"]
+    assert "使用中文进行思考" in system["content"]
+    assert "用户可见的进度说明和最终回答" in system["content"]
     assert "list_files" in system["content"]
     assert configs[0].max_steps == 9
 
@@ -384,7 +385,9 @@ def test_switching_session_language_keeps_workspace_and_conversation(tmp_path: P
     assert loaded.preferred_language == "en"
     assert loaded.workspace == str(workspace.resolve())
     assert len(loaded.model_context["turns"]) == 2
-    assert "preferred user-facing language is English" in model.requests[1][0]["content"]
+    english_prompt = model.requests[1][0]["content"]
+    assert "preferred language for this session is English" in english_prompt
+    assert "reasoning, user-visible progress, and the final answer" in english_prompt
     assert model.requests[1][1]["content"] == "Please inspect this project."
 
 

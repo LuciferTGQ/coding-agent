@@ -14,14 +14,16 @@ def build_system_prompt(
     """Build stable instructions without sending the absolute local root to the model."""
 
     language_instruction = (
-        "当前首选的用户交流语言为中文。无论用户输入本身使用什么语言，默认使用中文进行用户可见的进度说明和最终回答；"
-        "如果用户在当前请求中明确要求使用其他语言，则遵循用户的显式要求。代码、命令、路径、文件名、Tool 名称和协议字段保持原样，不要翻译。"
+        "当前首选语言为中文。默认使用中文进行思考、用户可见的进度说明和最终回答；"
+        "如果 Provider 返回 reasoning_content，也应使用中文。若用户在当前请求中明确要求使用其他语言，则遵循用户的显式要求。"
+        "代码、命令、路径、文件名、Tool 名称、JSON 和 Provider 协议字段保持原样，不要翻译。"
         if response_language == "zh"
         else (
-            "The preferred user-facing language is English. Reply in English by default "
-            "regardless of the language of the user's message, unless the user explicitly "
-            "requests another response language. Do not translate code, commands, paths, "
-            "filenames, tool names, or protocol fields."
+            "The preferred language for this session is English. Use English by default for "
+            "reasoning, user-visible progress, and the final answer; keep reasoning_content "
+            "in English when it is produced. Follow an explicit request in the current user "
+            "message for another response language. Do not translate code, commands, paths, "
+            "filenames, tool names, JSON, or provider protocol fields."
         )
     )
     delegation_instruction = (

@@ -151,7 +151,7 @@ coding-agent-gui
 
 输入区提供每个 Session 独立保存的 **子代理** Toggle，默认关闭。开启后 Main 可以按需使用 `delegate_task`，并在一次纯 delegation batch 中并行启动最多 4 个临时只读 Child；简单任务不会被强制委派。Child 只获得 `list_files`、`read_file`、`search_text`，使用独立 Context 和 ModelClient，其内部探索不会进入 Main Context，只有最终 findings 作为原 call id 的 Tool Result 返回。修改 Workspace 和最终验证仍由 Main 完成。运行中的 Turn 使用启动时的开关快照。
 
-轻量设置弹窗提供界面语言、默认模型、默认思考强度和默认最大步骤。桌面端支持 `deepseek-v4-flash` 和 `deepseek-v4-pro`，默认使用 Flash；模型选择按 Session 保存，运行中的任务保持启动时模型不变，下一轮使用当前选择。语言可选择中文或 English；保存语言变更后可以稍后应用，也可以安全启动新进程并立即重启。中文界面会要求模型除代码、命令、路径和必要技术标识外，默认使用中文交流。Tool 名称、JSON Schema 和 DeepSeek 协议字段不会被翻译。
+轻量设置弹窗提供界面语言、默认模型、默认思考强度和默认最大步骤。桌面端支持 `deepseek-v4-flash` 和 `deepseek-v4-pro`，默认使用 Flash；模型选择按 Session 保存，运行中的任务保持启动时模型不变，下一轮使用当前选择。语言可选择中文或 English；保存语言变更后可以稍后应用，也可以安全启动新进程并立即重启。思考过程和用户可见回复默认跟随当前界面语言；代码、命令、路径、文件名、必要技术标识、Tool 名称、JSON Schema 和 DeepSeek 协议字段保持原样。
 
 快捷键：`Ctrl+N` 新建对话，`Ctrl+,` 打开设置，`Ctrl+Return` 发送消息。
 
